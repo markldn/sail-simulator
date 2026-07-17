@@ -78,6 +78,7 @@ import { Boat } from './boat/Boat.js';
 import { Spray } from './effects/Spray.js';
 import { Runoff } from './effects/Runoff.js';
 import { Rain } from './effects/Rain.js';
+import { SoundSystem } from './audio/SoundSystem.js';
 import { SkySystem } from './environment/SkySystem.js';
 import { WindManager, MS_TO_KNOTS } from './wind/WindManager.js';
 import { PhysicsWorld } from './physics/PhysicsWorld.js';
@@ -172,6 +173,13 @@ async function init() {
   const rain = new Rain(scene);
   const _windVec = new THREE.Vector3();
 
+  // Procedural ambience (wind/sea/rush/rain/creak/slam). Browsers need a user
+  // gesture before audio starts, so resume() on the first pointer/key event.
+  const sound = new SoundSystem();
+  const startAudio = () => sound.resume();
+  window.addEventListener('pointerdown', startAudio, { once: false });
+  window.addEventListener('keydown', startAudio, { once: false });
+
   // ------------------------------------------------ debug wave-height probes
   // Three PBR spheres that follow ocean.getHeightAt() — the visual contract
   // test between the CPU wave math and the GPU surface (see file header).
@@ -246,7 +254,7 @@ async function init() {
     fpLook.pitch = THREE.MathUtils.clamp(fpLook.pitch, -1.2, 1.35);
   });
   // (TWS/TWD are fed per-frame in the loop now — the actual, gusty values.)
-  createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm });
+  createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm, sound });
 
   // ----------------------------------------------------------- post-processing
   const composer = new EffectComposer(renderer);
@@ -326,6 +334,7 @@ async function init() {
     const boatVel = boat.physics.body.linvel();
     if (boat.physics.slamIntensity > 0) {
       spray.burst(boat.physics.slamPoint, boatVel, boat.physics.slamIntensity);
+      sound.slam(boat.physics.slamIntensity);
       // A slam leaves the foredeck streaming.
       deckWet = Math.min(1, deckWet + 0.25 + boat.physics.slamIntensity * 0.12);
       boat.physics.slamIntensity = 0;
@@ -349,6 +358,16 @@ async function init() {
     const wdir = THREE.MathUtils.degToRad(wind.directionDegActual + 180); // blowing TO
     _windVec.set(Math.sin(wdir), 0, -Math.cos(wdir)).multiplyScalar(wind.speedMs);
     rain.update(frameDt, camera.position, _windVec, rainI);
+
+    // Procedural ambience mix.
+    sound.update({
+      windKn: wind.speedKnotsActual,
+      seaState: THREE.MathUtils.clamp(ocean._seaWindMs / 18, 0, 1),
+      rainI,
+      sog: boatState.sog,
+      heel: boatState.heel,
+      time: elapsed,
+    });
 
     // Keep the sun's shadow frustum on the boat.
     sky.trackShadowTarget(boatState.position);

@@ -18,7 +18,7 @@ import GUI from 'lil-gui';
  * @param {{followBoat: boolean}}                        deps.cameraState
  * @param {import('./Helm.js').Helm}                     deps.helm
  */
-export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm }) {
+export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm, sound }) {
   const gui = new GUI({ title: 'Environment' });
 
   const _tmpState = {};
@@ -198,6 +198,12 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
   boatFolder.add(cameraState, 'followBoat').name('Camera follows boat');
   boatFolder.add(cameraState, 'firstPerson').name('First-person view (C)').listen();
   boatFolder.add({ reset: () => boat.reset() }, 'reset').name('Reset boat ⟲ (R)');
+  if (sound) {
+    boatFolder
+      .add({ audio: true }, 'audio')
+      .name('Sound 🔊')
+      .onChange((v) => sound.setEnabled(v));
+  }
 
   // --- Debug ---------------------------------------------------------------------
   const debugFolder = gui.addFolder('Debug');
