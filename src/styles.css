@@ -75,8 +75,8 @@ body {
 
 .hud-grid {
   display: grid;
-  grid-template-columns: repeat(5, auto);
-  gap: 6px 16px;
+  grid-template-columns: repeat(7, auto);
+  gap: 6px 14px;
 }
 .hud-cell {
   display: flex;

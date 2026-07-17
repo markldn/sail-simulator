@@ -13,9 +13,11 @@ import GUI from 'lil-gui';
  * @param {import('../ocean/Ocean.js').Ocean}            deps.ocean
  * @param {import('../environment/SkySystem.js').SkySystem} deps.sky
  * @param {THREE.WebGLRenderer}                          deps.renderer
- * @param {{visible: boolean}}                           deps.probes debug buoyancy probes group
+ * @param {{visible: boolean}}                           deps.probes debug wave-height probes group
+ * @param {import('../boat/Boat.js').Boat}               deps.boat
+ * @param {{followBoat: boolean}}                        deps.cameraState
  */
-export function createControlPanel({ wind, ocean, sky, renderer, probes }) {
+export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState }) {
   const gui = new GUI({ title: 'Environment' });
 
   // --- Wind -----------------------------------------------------------------
@@ -56,9 +58,15 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes }) {
     .add(renderer, 'toneMappingExposure', 0.1, 2, 0.01)
     .name('Exposure');
 
+  // --- Boat -----------------------------------------------------------------------
+  const boatFolder = gui.addFolder('Boat');
+  boatFolder.add(cameraState, 'followBoat').name('Camera follows boat');
+  boatFolder.add({ reset: () => boat.reset() }, 'reset').name('Reset boat ⟲');
+
   // --- Debug ---------------------------------------------------------------------
   const debugFolder = gui.addFolder('Debug');
-  debugFolder.add(probes, 'visible').name('Buoyancy probes');
+  debugFolder.add(boat.sampleMarkers, 'visible').name('Buoyancy samples');
+  debugFolder.add(probes, 'visible').name('Wave-height probes');
   debugFolder
     .add(ocean.material, 'wireframe')
     .name('Ocean wireframe');

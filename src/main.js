@@ -1,13 +1,12 @@
 /**
  * main.js — application bootstrap and render loop.
  *
- * Phase 1 scope: scene / renderer / post-processing, Rapier world (empty,
- * fixed-step), Gerstner ocean with CPU height queries, dynamic sky + IBL,
- * wind state + HUD, and debug "buoyancy probes" — three spheres that ride
- * the waves using ocean.getHeightAt(). The probes exist to PROVE the CPU
- * wave math matches the GPU surface before Phase 2 hangs real physics off
- * it: if a probe ever sinks below or hovers above the rendered water, the
- * two have drifted apart and buoyancy would be wrong.
+ * Phase 1: scene / renderer / post-processing, fixed-step Rapier world,
+ * Gerstner ocean with CPU height queries, dynamic sky + IBL, wind + HUD.
+ * Phase 2: the boat — procedural hull, rigid body, sampled-column buoyancy
+ * and hydrodynamic drag (src/boat/), chase camera, live SOG/HDG/HEEL.
+ * The debug probes (spheres riding ocean.getHeightAt()) remain available
+ * to verify the CPU wave math still matches the GPU surface.
  *
  * Post-processing status (honest accounting):
  *   ✓ HDR pipeline, ACES tone mapping (OutputPass)
@@ -30,6 +29,7 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import { Ocean } from './ocean/Ocean.js';
+import { Boat } from './boat/Boat.js';
 import { SkySystem } from './environment/SkySystem.js';
 import { WindManager, MS_TO_KNOTS } from './wind/WindManager.js';
 import { PhysicsWorld } from './physics/PhysicsWorld.js';
@@ -81,9 +81,14 @@ async function init() {
 
   const wind = new WindManager({ speedKnots: 12, directionDeg: 315 });
 
-  // ------------------------------------------------- debug buoyancy probes
+  // The boat: visual model + rigid body + buoyancy (see src/boat/).
+  const boat = new Boat(scene, physics, ocean);
+
+  // ------------------------------------------------ debug wave-height probes
   // Three PBR spheres that follow ocean.getHeightAt() — the visual contract
   // test between the CPU wave math and the GPU surface (see file header).
+  // Off by default now the boat itself demonstrates the same contract;
+  // re-enable from the Debug folder.
   const probes = new THREE.Group();
   const probeGeo = new THREE.SphereGeometry(0.45, 32, 24);
   const probeMat = new THREE.MeshStandardMaterial({
@@ -92,7 +97,7 @@ async function init() {
     metalness: 0.0,
   });
   const probePositions = [
-    [0, 0],
+    [10, 0],
     [14, -8],
     [-11, 16],
   ];
@@ -101,12 +106,14 @@ async function init() {
     m.userData.gridPos = { x: px, z: pz };
     probes.add(m);
   }
+  probes.visible = false;
   scene.add(probes);
 
   // ---------------------------------------------------------------------- UI
   const hud = new HUD();
+  const cameraState = { followBoat: true };
   wind.onChange((w) => hud.update({ tws: w.speedKnots, twd: w.directionDeg }));
-  createControlPanel({ wind, ocean, sky, renderer, probes });
+  createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState });
 
   // ----------------------------------------------------------- post-processing
   const composer = new EffectComposer(renderer);
@@ -146,12 +153,25 @@ async function init() {
     const frameDt = clock.getDelta();
     const elapsed = clock.elapsedTime;
 
-    // Physics first (empty world in Phase 1, but the fixed-step plumbing is
-    // live — Phase 2 buoyancy hooks into physics.preStepHooks).
+    // Advance the ocean clock FIRST: the buoyancy hooks inside physics.step
+    // query ocean.getHeightAt(), which must see the same time the water is
+    // rendered with this frame. (Substeps within a frame share this time —
+    // a ≤16 ms approximation, well below anything visible.)
+    ocean.update(elapsed, camera);
+
     physics.step(frameDt);
 
-    // Ocean time MUST be the same clock physics/height queries use.
-    ocean.update(elapsed, camera);
+    // Snap the boat mesh to its rigid body; feed the instruments.
+    const boatState = boat.updateVisuals();
+    hud.update({ sog: boatState.sog, hdg: boatState.heading, heel: boatState.heel });
+
+    // Chase target: keep orbiting around the boat as it drifts/sails.
+    if (cameraState.followBoat) {
+      controls.target.lerp(
+        { x: boatState.position.x, y: boatState.position.y + 1, z: boatState.position.z },
+        0.08
+      );
+    }
 
     // Ride the probes on the CPU-evaluated wave height.
     if (probes.visible) {
