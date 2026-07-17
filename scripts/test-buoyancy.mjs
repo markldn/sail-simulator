@@ -119,6 +119,22 @@ async function runScenario(name, heightScale, choppiness, seconds, extraWave = n
 }
 
 // ---------------------------------------------------------------- Test 3
+// Survival conditions: the sea state the Gale/Hurricane presets produce
+// (height ×2.4, chop 1.05). Verifies the reserve-buoyancy columns shoulder
+// the boat out of crests instead of letting it sail cleanly through them.
+{
+  const r = await runScenario('Storm sea ×2.4, chop 1.05 — survival (60 s)', 2.4, 1.05, 60);
+  console.log(
+    `    y∈[${r.minY.toFixed(2)}, ${r.maxY.toFixed(2)}] m  maxHeel=${r.maxAbsHeel.toFixed(1)}°` +
+      `  maxPitch=${r.maxAbsPitch.toFixed(1)}°`
+  );
+  check('stays with the surface (y > -5 m)', r.minY > -5, `minY=${r.minY.toFixed(2)}`);
+  check('not launched (y < 6.5 m)', r.maxY < 6.5, `maxY=${r.maxY.toFixed(2)}`);
+  check('survives without capsize (max |heel| < 55°)', r.maxAbsHeel < 55, `${r.maxAbsHeel.toFixed(1)}°`);
+  check('no pitchpole (max |pitch| < 40°)', r.maxAbsPitch < 40, `${r.maxAbsPitch.toFixed(1)}°`);
+}
+
+// ---------------------------------------------------------------- Test 4
 // The tsunami preset: normal sea PLUS a 300 m / 8 m event wave. The wave is
 // long (max slope ≈ 9.6°), so a boat that rides the surface should climb
 // over it repeatedly without capsizing or being launched.

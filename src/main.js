@@ -160,6 +160,7 @@ async function init() {
 
   // -------------------------------------------------------------- render loop
   const clock = new THREE.Clock();
+  const _fwd = new THREE.Vector3(); // scratch: boat forward for the wake
 
   function animate() {
     requestAnimationFrame(animate);
@@ -190,6 +191,19 @@ async function init() {
 
     // Keep the sun's shadow frustum on the boat.
     sky.trackShadowTarget(boatState.position);
+
+    // Boat → ocean shader: contact foam / wake, and the shadow map (which
+    // only exists after the first shadowed render, hence wired here).
+    _fwd.set(1, 0, 0).applyQuaternion(boatState.quaternion);
+    const fwdLen = Math.hypot(_fwd.x, _fwd.z) || 1;
+    ocean.setBoatState(
+      boatState.position.x,
+      boatState.position.z,
+      _fwd.x / fwdLen,
+      _fwd.z / fwdLen,
+      boatState.sog * 0.514444
+    );
+    ocean.updateShadow(sky.sunLight);
 
     // Chase target: keep orbiting around the boat as it drifts/sails.
     if (cameraState.followBoat) {

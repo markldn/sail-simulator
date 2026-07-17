@@ -53,6 +53,13 @@ const SEA_ROT_RATE = THREE.MathUtils.degToRad(6); // rad/s max direction swing
 // wave" (tsunami / rogue-wave presets). Amplitude 0 keeps it inert.
 const WAVE_SLOTS = NUM_WAVES + 1;
 
+/** 1×1 white RGBA texture: unpacks to depth 1.0 → "nothing in shadow". */
+function makeWhiteTexture() {
+  const tex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+  tex.needsUpdate = true;
+  return tex;
+}
+
 const VERTEX_SHADER = /* glsl */ `
   #define NUM_WAVES ${WAVE_SLOTS}
   #define TWO_PI 6.28318530718
@@ -119,8 +126,16 @@ const FRAGMENT_SHADER = /* glsl */ `
   #define TWO_PI 6.28318530718
   #define GRAVITY ${GRAVITY.toFixed(4)}
 
+  // three's packing chunk: unpackRGBAToDepth for reading the shadow map
+  #include <packing>
+
   uniform float uTime;
   uniform float uWaveRot;       // detail ripples swing with the sea too
+  uniform vec4  uBoatPosDir;    // boat x, z, forwardX, forwardZ
+  uniform float uBoatSpeed;     // m/s
+  uniform sampler2D uShadowMap; // sun shadow map (boat shadow on water)
+  uniform mat4  uShadowMatrix;
+  uniform float uShadowStrength; // 0 = shadow sampling off
   uniform vec3  uSunDir;        // TOWARDS the sun, normalized
   uniform vec3  uSunColor;      // linear
   uniform vec3  uZenithColor;   // analytic sky gradient (matches SkySystem)
@@ -170,6 +185,57 @@ const FRAGMENT_SHADER = /* glsl */ `
     return grad;
   }
 
+  // --- boat interaction foam ------------------------------------------------
+  // Purely cosmetic, but it is what makes the hull look IN the water rather
+  // than intersecting it: a churned ring where the hull pierces the
+  // surface, and a spreading wake astern that grows with speed.
+  float boatFoam(vec2 p, float t) {
+    vec2 rel = p - uBoatPosDir.xy;
+    vec2 fwd = uBoatPosDir.zw;
+    float along  = dot(rel, fwd);
+    float across = rel.x * fwd.y - rel.y * fwd.x;
+
+    // Contact ring: a soft band hugging the hull's waterline ellipse.
+    float e = (along * along) / (4.6 * 4.6) + (across * across) / (1.9 * 1.9);
+    float ring = smoothstep(1.5, 1.0, e) * smoothstep(0.45, 0.85, e);
+
+    // Wake: only astern, longer and denser with speed.
+    float wake = 0.0;
+    float sp = clamp(uBoatSpeed / 3.0, 0.0, 1.5);
+    if (along < 0.0 && sp > 0.05) {
+      float back  = -along;
+      float len   = 10.0 + 22.0 * sp;
+      float width = 1.3 + 0.28 * back;
+      wake = sp
+           * (1.0 - smoothstep(0.0, len, back))
+           * smoothstep(width, width * 0.35, abs(across));
+    }
+
+    float n = vnoise(p * 1.3 + vec2(t * 0.2, -t * 0.13));
+    return clamp(ring * (0.55 + 0.5 * n) + wake * (0.4 + 0.6 * n), 0.0, 1.0);
+  }
+
+  // --- sun shadow (the boat shading the water) --------------------------------
+  // 3×3 PCF against the DirectionalLight's shadow map. Outside the shadow
+  // camera's frustum (which tracks the boat) the water is simply unshadowed.
+  float sunShadow() {
+    if (uShadowStrength < 0.01) return 1.0;
+    vec4 sc = uShadowMatrix * vec4(vWorldPos, 1.0);
+    vec3 uvz = sc.xyz / sc.w;
+    if (any(lessThan(uvz, vec3(0.001))) || any(greaterThan(uvz, vec3(0.999)))) return 1.0;
+    float lit = 0.0;
+    vec2 texel = vec2(1.0 / 2048.0) * 1.4;
+    for (int i = -1; i <= 1; i++) {
+      for (int j = -1; j <= 1; j++) {
+        float d = unpackRGBAToDepth(
+          texture2D(uShadowMap, uvz.xy + vec2(float(i), float(j)) * texel));
+        lit += step(uvz.z - 0.004, d);
+      }
+    }
+    lit /= 9.0;
+    return mix(1.0 - uShadowStrength, 1.0, lit);
+  }
+
   // --- analytic sky, kept consistent with SkySystem's fed colors ----------
   vec3 skyColor(vec3 dir) {
     float h = clamp(dir.y, 0.0, 1.0);
@@ -194,6 +260,9 @@ const FRAGMENT_SHADER = /* glsl */ `
     float NdotV = max(dot(N, V), 0.0);
     float fresnel = 0.02 + 0.98 * pow(1.0 - NdotV, 5.0);
 
+    // Sun visibility here (1 = lit, dips where the boat shades the water).
+    float shadow = sunShadow();
+
     // ---- Sky reflection --------------------------------------------------
     vec3 R = reflect(-V, N);
     R.y = max(R.y, 0.02); // water can't reflect what's below the horizon
@@ -206,12 +275,12 @@ const FRAGMENT_SHADER = /* glsl */ `
     float sunThrough = pow(max(dot(V, -uSunDir), 0.0), 3.0);
     float crestBoost = clamp(vHeight * 0.55 + 0.45, 0.0, 1.2);
     vec3 body = uDeepColor;
-    body += uScatterColor * (0.30 + 0.70 * max(dot(N, uSunDir), 0.0)) * 0.35;
-    body += uScatterColor * sunThrough * crestBoost * 0.85;
+    body += uScatterColor * (0.30 + 0.70 * max(dot(N, uSunDir), 0.0) * shadow) * 0.35;
+    body += uScatterColor * sunThrough * crestBoost * 0.85 * shadow;
 
     // ---- Sun specular (sharp Blinn lobe; ACES + bloom shape the rest) ---
     vec3 H = normalize(uSunDir + V);
-    float spec = pow(max(dot(N, H), 0.0), 380.0) * 2.2;
+    float spec = pow(max(dot(N, H), 0.0), 380.0) * 2.2 * shadow;
     vec3 specular = uSunColor * spec;
 
     // ---- Foam ------------------------------------------------------------
@@ -221,7 +290,9 @@ const FRAGMENT_SHADER = /* glsl */ `
     float foamNoise = vnoise(vWorldPos.xz * 1.7 + uTime * 0.15)
                     * vnoise(vWorldPos.xz * 0.23 - uTime * 0.02);
     float foam = smoothstep(0.42, 0.85, vGrad.y + foamNoise * 0.35 - 0.18);
-    vec3 foamColor = vec3(0.92) * (0.25 + 0.75 * max(dot(N, uSunDir), 0.0))
+    // Hull churn + wake join the natural crest foam.
+    foam = clamp(foam + boatFoam(vWorldPos.xz, uTime), 0.0, 1.0);
+    vec3 foamColor = vec3(0.92) * (0.25 + 0.75 * max(dot(N, uSunDir), 0.0) * shadow)
                    * (uSunColor * 0.5 + vec3(0.5));
 
     // ---- Composite -------------------------------------------------------
@@ -286,6 +357,16 @@ export class Ocean {
       uDeepColor: { value: new THREE.Color(0.008, 0.042, 0.09) },
       uScatterColor: { value: new THREE.Color(0.02, 0.22, 0.26) },
       uFogDensity: { value: 0.0016 },
+      // Boat interaction: (x, z, forwardX, forwardZ) + speed. Drives hull
+      // contact foam and the wake trail in the fragment shader.
+      uBoatPosDir: { value: new THREE.Vector4(0, 0, 1, 0) },
+      uBoatSpeed: { value: 0 },
+      // Sun shadow (the boat's shadow on the water). Starts as a 1×1 white
+      // texture (= "no shadow") until main.js wires the real shadow map
+      // after the first shadow render.
+      uShadowMap: { value: makeWhiteTexture() },
+      uShadowMatrix: { value: new THREE.Matrix4() },
+      uShadowStrength: { value: 0 },
     };
 
     // Plane built in the XZ plane directly (rotateX would complicate the
@@ -349,6 +430,27 @@ export class Ocean {
       this.waves, x, z, this.time, this.heightScale, this.choppiness, this.waveRot
     );
     return target.set(v.x, v.y, v.z);
+  }
+
+  /** Per-frame boat state for contact foam + wake (world XZ, unit forward,
+   *  horizontal speed in m/s). */
+  setBoatState(x, z, fwdX, fwdZ, speedMs) {
+    this.uniforms.uBoatPosDir.value.set(x, z, fwdX, fwdZ);
+    this.uniforms.uBoatSpeed.value = speedMs;
+  }
+
+  /**
+   * Wire the sun's live shadow map so the boat shades the water. The map
+   * only exists after the first shadowed render, hence per-frame wiring
+   * from main.js rather than at construction. The Matrix4 is shared by
+   * reference — three re-uploads its current values every draw.
+   */
+  updateShadow(sunLight) {
+    if (sunLight.shadow.map && this.uniforms.uShadowStrength.value === 0) {
+      this.uniforms.uShadowMap.value = sunLight.shadow.map.texture;
+      this.uniforms.uShadowMatrix.value = sunLight.shadow.matrix;
+      this.uniforms.uShadowStrength.value = 0.7;
+    }
   }
 
   /**

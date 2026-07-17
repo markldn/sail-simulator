@@ -58,6 +58,12 @@ const NX = 8; // stations along the hull
 const NU = 4; // columns across each station
 const U_SPAN = 0.88; // keep samples inboard of the sheer edge
 
+// Reserve buoyancy: real hulls keep displacing water ABOVE the sheer line
+// (flared topsides, coamings, the cabin, the enclosed hull volume), which
+// is what shoulders a boat up out of a crest instead of letting it sail
+// cleanly through one. Columns keep generating force this far above deck.
+const RESERVE_BUOYANCY = 0.45; // m
+
 export const TUNING = {
   // Heave (vertical) damping per m² of column area, vs water-relative
   // velocity. Sized for ~0.3 of critical damping of the heave oscillator
@@ -184,7 +190,8 @@ export class BoatPhysics {
         this.samples.push({
           local: new THREE.Vector3(stationX(t), y, hb * u),
           area,
-          columnHeight: HULL.sheer - y, // column caps at the deck
+          // Column caps a little ABOVE the deck — see RESERVE_BUOYANCY.
+          columnHeight: HULL.sheer - y + RESERVE_BUOYANCY,
         });
       }
     }
