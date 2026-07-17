@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sailboat Simulator — Phase 1: Ocean &amp; Wind</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <!--
+      The Three.js canvas is appended to #app by src/main.js.
+      The HUD and control panel are also built dynamically (src/ui/*),
+      keeping this entry file free of markup that would drift out of
+      sync with the code.
+    -->
+    <div id="app"></div>
+
+    <!-- Loading veil: removed by main.js once Rapier (WASM) has initialised -->
+    <div id="loading">
+      <div class="loading-inner">
+        <div class="loading-title">SAILBOAT SIMULATOR</div>
+        <div class="loading-sub">initialising physics &amp; ocean…</div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
