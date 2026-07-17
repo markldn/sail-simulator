@@ -78,6 +78,7 @@ import { Boat } from './boat/Boat.js';
 import { Spray } from './effects/Spray.js';
 import { Runoff } from './effects/Runoff.js';
 import { Rain } from './effects/Rain.js';
+import { Spindrift } from './effects/Spindrift.js';
 import { SoundSystem } from './audio/SoundSystem.js';
 import { SkySystem } from './environment/SkySystem.js';
 import { WindManager, MS_TO_KNOTS } from './wind/WindManager.js';
@@ -171,6 +172,8 @@ async function init() {
   const runoff = new Runoff(scene);
   // Wind-driven rain — fades in around gale force, lashes down in a storm.
   const rain = new Rain(scene);
+  // Spindrift — spray torn off the wave crests, driven downwind in a blow.
+  const spindrift = new Spindrift(scene);
   const _windVec = new THREE.Vector3();
 
   // Procedural ambience (wind/sea/rush/rain/creak/slam). Browsers need a user
@@ -358,6 +361,9 @@ async function init() {
     const wdir = THREE.MathUtils.degToRad(wind.directionDegActual + 180); // blowing TO
     _windVec.set(Math.sin(wdir), 0, -Math.cos(wdir)).multiplyScalar(wind.speedMs);
     rain.update(frameDt, camera.position, _windVec, rainI);
+    // Spindrift starts a bit earlier than rain (crests blow off ~gale force).
+    const driftI = THREE.MathUtils.clamp((wind.speedKnotsActual - 30) / 25, 0, 1);
+    spindrift.update(frameDt, camera.position, ocean, _windVec, driftI);
 
     // Procedural ambience mix.
     sound.update({
