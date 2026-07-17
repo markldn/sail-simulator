@@ -128,6 +128,23 @@ export class BoatPhysics {
     // 0 = doused). GUI sliders write here; physics and visuals both read it.
     this.sailPlan = { main: 1, jib: 1 };
 
+    // Two-way cloth coupling (fed by Sails via setClothAero):
+    // - forces are applied at the cloth's LIVE centre of pressure, so reef,
+    //   twist and flogging genuinely move the heel/yaw arms;
+    // - during luffing the raw integrated cloth force is blended in (the
+    //   polar model is out of its envelope there; pressure chaos is not).
+    // Attached-flow magnitude still comes from the validated polars — a
+    // pressure-only membrane has no leading-edge suction and would
+    // underestimate upwind lift several-fold.
+    // Falls back to the fixed-CE analytic model when no cloth data arrives
+    // (headless tests, cloth disabled) via the freshness age below.
+    this.clothCouplingEnabled = true;
+    this._cloth = {
+      age: Infinity,
+      main: { force: new THREE.Vector3(), cp: new THREE.Vector3() },
+      jib: { force: new THREE.Vector3(), cp: new THREE.Vector3() },
+    };
+
     const RAPIER = physicsWorld.RAPIER;
 
     // Instrument/visual readout of the last aero solution, refreshed every
@@ -242,6 +259,7 @@ export class BoatPhysics {
 
     b.resetForces(true);
     b.resetTorques(true);
+    this._cloth.age += dt;
 
     this._pos.set(tr.x, tr.y, tr.z);
     this._q.set(rot.x, rot.y, rot.z, rot.w);
@@ -414,13 +432,25 @@ export class BoatPhysics {
       const L = q * sailCL(alpha);
       const D = q * sailCD(alpha);
 
-      this._force
-        .set(liftX * L + flowX * D, 0, liftZ * L + flowZ * D)
-        .applyQuaternion(this._q);
-      const ceWorld = this._worldP
-        .set(sail.ce.x, sail.ce.y * (0.35 + 0.65 * hoist), sail.ce.z)
-        .applyQuaternion(this._q)
-        .add(this._pos);
+      const cloth =
+        this.clothCouplingEnabled && this._cloth.age < 0.25
+          ? this._cloth[sail.name]
+          : null;
+
+      this._force.set(liftX * L + flowX * D, 0, liftZ * L + flowZ * D);
+      // Luffing/flogging: polars say ~zero, the cloth knows better — blend
+      // in its raw integrated pressure force (body frame).
+      if (cloth && alpha < 6) {
+        const wLuff = 1 - THREE.MathUtils.clamp((alpha - 2) / 4, 0, 1);
+        this._force.addScaledVector(cloth.force, wLuff);
+      }
+      this._force.applyQuaternion(this._q);
+
+      // Application point: live cloth centre of pressure when available.
+      const ceWorld = cloth
+        ? this._worldP.copy(cloth.cp)
+        : this._worldP.set(sail.ce.x, sail.ce.y * (0.35 + 0.65 * hoist), sail.ce.z);
+      ceWorld.applyQuaternion(this._q).add(this._pos);
       this.body.addForceAtPoint(this._force, ceWorld, true);
 
       if (sail.name === 'main') {
@@ -475,6 +505,18 @@ export class BoatPhysics {
     this.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
     this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  }
+
+  /**
+   * Two-way coupling input from the cloth simulation (body frame).
+   * @param {{main:{force,cp}, jib:{force,cp}}} data smoothed by Sails
+   */
+  setClothAero(data) {
+    this._cloth.main.force.copy(data.main.force);
+    this._cloth.main.cp.copy(data.main.cp);
+    this._cloth.jib.force.copy(data.jib.force);
+    this._cloth.jib.cp.copy(data.jib.cp);
+    this._cloth.age = 0;
   }
 
   /** Orbital water velocity, or zero for oceans that don't provide it

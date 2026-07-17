@@ -27,6 +27,33 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+/**
+ * Underwater veil: fades in when the camera is below the local wave
+ * surface — teal absorption, depth-darkening, soft vignette. Runs on the
+ * LDR image after tone mapping.
+ */
+const UnderwaterShader = {
+  uniforms: { tDiffuse: { value: null }, uAmount: { value: 0 } },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uAmount;
+    varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      vec3 water = vec3(0.05, 0.16, 0.20);
+      float vig = smoothstep(1.25, 0.3, length(vUv - 0.5) * 2.0);
+      vec3 murk = mix(c.rgb, water, 0.72) * (0.3 + 0.45 * vig);
+      gl_FragColor = vec4(mix(c.rgb, murk, uAmount), c.a);
+    }`,
+};
 
 import { Ocean } from './ocean/Ocean.js';
 import { Boat } from './boat/Boat.js';
@@ -148,6 +175,9 @@ async function init() {
   // OutputPass performs tone mapping + linear→sRGB. SMAA runs AFTER it, on
   // the final LDR image, which is where an LDR morphological AA belongs.
   composer.addPass(new OutputPass());
+  const underwaterPass = new ShaderPass(UnderwaterShader);
+  underwaterPass.enabled = false;
+  composer.addPass(underwaterPass);
   const smaa = new SMAAPass(
     window.innerWidth * renderer.getPixelRatio(),
     window.innerHeight * renderer.getPixelRatio()
@@ -165,6 +195,7 @@ async function init() {
   // -------------------------------------------------------------- render loop
   const clock = new THREE.Clock();
   const _fwd = new THREE.Vector3(); // scratch: boat forward for the wake
+  let underwaterAmt = 0;
 
   function animate() {
     requestAnimationFrame(animate);
@@ -220,6 +251,13 @@ async function init() {
       boatState.sog * 0.514444
     );
     ocean.updateShadow(sky.sunLight);
+
+    // Underwater veil when the camera dips below the local wave surface.
+    const camWaterY = ocean.getHeightAt(camera.position.x, camera.position.z);
+    const underTarget = camera.position.y < camWaterY - 0.05 ? 1 : 0;
+    underwaterAmt += (underTarget - underwaterAmt) * (1 - Math.exp(-frameDt * 10));
+    underwaterPass.uniforms.uAmount.value = underwaterAmt;
+    underwaterPass.enabled = underwaterAmt > 0.01;
 
     // Chase target: keep orbiting around the boat as it drifts/sails.
     if (cameraState.followBoat) {

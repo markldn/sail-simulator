@@ -99,6 +99,7 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
   const skyFolder = gui.addFolder('Sun & sky');
   skyFolder.add(sky, 'elevationDeg', 0.5, 89, 0.5).name('Sun elevation (°)').onChange(applySun);
   skyFolder.add(sky, 'azimuthDeg', 0, 360, 1).name('Sun azimuth (°)').onChange(applySun);
+  skyFolder.add(sky, 'overcast', 0, 1, 0.01).name('Overcast').listen().onChange(applySun);
   skyFolder
     .add(renderer, 'toneMappingExposure', 0.1, 2, 0.01)
     .name('Exposure')
@@ -111,31 +112,32 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
   const PRESETS = {
     '⛵ Fair sailing': {
       windKn: 12, windDir: 315, sunElev: 32, sunAz: 155, turbidity: 6,
-      rayleigh: 1.8, fog: 0.0016, exposure: 0.5, main: 1, jib: 1,
+      rayleigh: 1.8, fog: 0.0016, exposure: 0.5, main: 1, jib: 1, overcast: 0,
     },
     '🌅 Calm dawn': {
       windKn: 3, sunElev: 7, sunAz: 95, turbidity: 4, rayleigh: 2.2,
-      fog: 0.0022, exposure: 0.55, main: 1, jib: 1,
+      fog: 0.0022, exposure: 0.55, main: 1, jib: 1, overcast: 0.05,
     },
     '💨 Fresh breeze': {
       windKn: 18, sunElev: 48, turbidity: 5, rayleigh: 1.6,
-      fog: 0.0014, exposure: 0.5, main: 1, jib: 1,
+      fog: 0.0014, exposure: 0.5, main: 1, jib: 1, overcast: 0.15,
     },
     '🌫 Fog bank': {
       windKn: 7, sunElev: 22, turbidity: 9, fog: 0.012, exposure: 0.46,
-      main: 1, jib: 1,
+      main: 1, jib: 1, overcast: 0.55,
     },
     // Reefed main, no jib — the seamanlike gale rig. Try full sail here
-    // and watch the knockdowns.
+    // and watch the knockdowns. Gloom comes from the overcast factor, not
+    // turbidity (high Preetham turbidity BRIGHTENS the sky — wrong tool).
     '⛈ Gale': {
-      windKn: 34, sunElev: 12, turbidity: 16, rayleigh: 0.6,
-      fog: 0.005, exposure: 0.4, main: 0.4, jib: 0,
+      windKn: 34, sunElev: 18, turbidity: 8, rayleigh: 0.8,
+      fog: 0.005, exposure: 0.42, main: 0.4, jib: 0, overcast: 0.8,
     },
     // Storm canvas only. Survival conditions — expect to get rolled if
     // you present the beam to the seas.
     '🌀 Hurricane': {
-      windKn: 55, sunElev: 6, turbidity: 20, rayleigh: 0.5,
-      fog: 0.008, exposure: 0.34, main: 0.15, jib: 0,
+      windKn: 55, sunElev: 14, turbidity: 10, rayleigh: 0.7,
+      fog: 0.008, exposure: 0.36, main: 0.15, jib: 0, overcast: 0.92,
     },
     // 300 m / 8 m event wave aimed at the bow. Deep-water tsunami — long
     // and fast (~40 kn) rather than a breaking wall (that's a shoaling
@@ -150,6 +152,7 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
   };
 
   const applyPreset = (p) => {
+    sky.overcast = p.overcast ?? 0;
     if (p.windKn != null) wind.setSpeedKnots(p.windKn);
     if (p.windDir != null) wind.setDirectionDeg(p.windDir);
     if (p.main != null) boat.physics.sailPlan.main = p.main;
@@ -184,6 +187,9 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
   // the same state object.
   const sailFolder = gui.addFolder('Sailing');
   sailFolder.add(helm.state, 'autoTrim').name('Auto-trim (T)').listen();
+  sailFolder
+    .add(boat.physics, 'clothCouplingEnabled')
+    .name('Cloth-coupled forces');
   sailFolder.add(helm.state, 'sheetMaxDeg', 8, 88, 1).name('Sheet (↑ in / ↓ out)').listen();
   sailFolder.add(helm.state, 'rudderDeg', -32, 32, 1).name('Rudder (← / →)').listen();
 

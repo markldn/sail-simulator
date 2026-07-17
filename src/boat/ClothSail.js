@@ -63,6 +63,18 @@ export class ClothSail {
     this.pinned = new Uint8Array(this.n);
     this.ropes = []; // {index, ax, ay, az, rest} — set each frame by Sails
 
+    // Capsule colliders (rigging): {ax,ay,az, bx,by,bz, r} segments the
+    // cloth may not penetrate — mast, shrouds. Set once by Sails.
+    this.colliders = [];
+
+    // Integrated aero state, refreshed every step() — the two-way coupling
+    // channel: total pressure force, torque about the body origin, and the
+    // |F|-weighted centre of pressure.
+    this.aeroForce = new THREE.Vector3();
+    this.aeroTorque = new THREE.Vector3();
+    this.pressureCentroid = new THREE.Vector3();
+    this.pressureWeight = 0;
+
     const id = (i, j) => i * cols + j;
     this.id = id;
 
@@ -194,6 +206,9 @@ export class ClothSail {
 
     // ---- wind pressure per triangle ----------------------------------------
     force.fill(0);
+    let sumFx = 0, sumFy = 0, sumFz = 0;
+    let sumTx = 0, sumTy = 0, sumTz = 0;
+    let sumW = 0, cenX = 0, cenY = 0, cenZ = 0;
     const invDt = 1 / dt;
     for (let t = 0; t < tris.length; t += 3) {
       const a3 = tris[t] * 3;
@@ -226,7 +241,23 @@ export class ClothSail {
       force[a3] += fx; force[a3 + 1] += fy; force[a3 + 2] += fz;
       force[b3] += fx; force[b3 + 1] += fy; force[b3 + 2] += fz;
       force[c3] += fx; force[c3 + 1] += fy; force[c3 + 2] += fz;
+
+      // integrate for the hull: whole-triangle force, torque, |F|-weighted CP
+      const ftx = fx * 3, fty = fy * 3, ftz = fz * 3;
+      const cx = (pos[a3] + pos[b3] + pos[c3]) / 3;
+      const cy = (pos[a3 + 1] + pos[b3 + 1] + pos[c3 + 1]) / 3;
+      const cz = (pos[a3 + 2] + pos[b3 + 2] + pos[c3 + 2]) / 3;
+      sumFx += ftx; sumFy += fty; sumFz += ftz;
+      sumTx += cy * ftz - cz * fty;
+      sumTy += cz * ftx - cx * ftz;
+      sumTz += cx * fty - cy * ftx;
+      const w = Math.abs(f) * 3;
+      sumW += w; cenX += cx * w; cenY += cy * w; cenZ += cz * w;
     }
+    this.aeroForce.set(sumFx, sumFy, sumFz);
+    this.aeroTorque.set(sumTx, sumTy, sumTz);
+    this.pressureWeight = sumW;
+    if (sumW > 1e-4) this.pressureCentroid.set(cenX / sumW, cenY / sumW, cenZ / sumW);
 
     // ---- Verlet integration --------------------------------------------------
     const dt2 = dt * dt;
@@ -275,6 +306,34 @@ export class ClothSail {
         pos[b3 + 1] -= dy * diff * wb;
         pos[b3 + 2] -= dz * diff * wb;
       }
+      // rigging collision: push particles out of mast/shroud capsules
+      for (let cl = 0; cl < this.colliders.length; cl++) {
+        const col = this.colliders[cl];
+        const ex = col.bx - col.ax;
+        const ey = col.by - col.ay;
+        const ez = col.bz - col.az;
+        const ee = ex * ex + ey * ey + ez * ez;
+        for (let p = 0; p < this.n; p++) {
+          if (pinned[p]) continue;
+          const k = p * 3;
+          const rx = pos[k] - col.ax;
+          const ry = pos[k + 1] - col.ay;
+          const rz = pos[k + 2] - col.az;
+          let tt = (rx * ex + ry * ey + rz * ez) / ee;
+          tt = tt < 0 ? 0 : tt > 1 ? 1 : tt;
+          const dx = rx - ex * tt;
+          const dy = ry - ey * tt;
+          const dz = rz - ez * tt;
+          const d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 >= col.r * col.r || d2 < 1e-12) continue;
+          const d = Math.sqrt(d2);
+          const push = (col.r - d) / d;
+          pos[k] += dx * push;
+          pos[k + 1] += dy * push;
+          pos[k + 2] += dz * push;
+        }
+      }
+
       // ropes: one-sided (pull only) — the sheet constraint
       for (let r = 0; r < this.ropes.length; r++) {
         const rope = this.ropes[r];

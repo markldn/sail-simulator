@@ -398,7 +398,11 @@ export class Ocean {
       vertexShader: VERTEX_SHADER,
       fragmentShader: FRAGMENT_SHADER,
       uniforms: this.uniforms,
-      side: THREE.FrontSide,
+      // DoubleSide so the surface exists when the camera dips under a wave
+      // (the underwater post-pass in main.js supplies the murk; the
+      // backside shading itself is approximate — noted for a future true
+      // underwater phase).
+      side: THREE.DoubleSide,
     });
 
     this.mesh = new THREE.Mesh(geometry, this.material);

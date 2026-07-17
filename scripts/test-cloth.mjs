@@ -99,6 +99,46 @@ function stats(sail) {
   check('no windward balloon (minZ > -1.0 m)', s.minZ > -1.0, `${s.minZ.toFixed(2)} m`);
   check('leech alive at steady trim (σ > 0.5 mm)', Math.sqrt(variance) > 0.0005,
     `${(Math.sqrt(variance) * 1000).toFixed(2)} mm`);
+
+  // Two-way coupling channel: integrated pressure force and centre of
+  // pressure must be sane (downwind push, magnitude of the right order for
+  // ~11 m² at 6 m/s, CP inside the sail).
+  const F = sail.aeroForce;
+  const cp = sail.pressureCentroid;
+  console.log(
+    `    aeroForce=(${F.x.toFixed(0)}, ${F.y.toFixed(0)}, ${F.z.toFixed(0)}) N` +
+      `  CP=(${cp.x.toFixed(2)}, ${cp.y.toFixed(2)})`
+  );
+  check('integrated force pushes downwind (Fz > 40 N)', F.z > 40, `${F.z.toFixed(0)} N`);
+  check('force magnitude sane (< 1200 N)', F.length() < 1200, `${F.length().toFixed(0)} N`);
+  check('CP inside the sail (1 < y < 7)', cp.y > 1 && cp.y < 7, `y=${cp.y.toFixed(2)}`);
+}
+
+// ---------------------------------------------------------------- collision
+{
+  console.log('\n▸ Rigging collision — cloth must not pass through a capsule');
+  const sail = makeSail();
+  pinEdges(sail);
+  // vertical "shroud" capsule right where the blown cloth wants to go
+  const col = { ax: -1.5, ay: 0, az: 0.3, bx: -1.5, by: HEIGHT, bz: 0.3, r: 0.15 };
+  sail.colliders.push(col);
+  run(sail, { x: -1.5, y: 0, z: 6 }, 10);
+  let minClearance = Infinity;
+  for (let p = 0; p < sail.n; p++) {
+    if (sail.pinned[p]) continue;
+    const k = p * 3;
+    const y = sail.pos[k + 1];
+    if (y < col.ay || y > col.by) continue;
+    minClearance = Math.min(
+      minClearance,
+      Math.hypot(sail.pos[k] - col.ax, sail.pos[k + 2] - col.az)
+    );
+  }
+  const s = stats(sail);
+  console.log(`    min clearance from shroud axis: ${minClearance.toFixed(3)} m (r=${col.r})`);
+  check('no NaN with collision active', s.finite);
+  check('cloth stays outside the capsule (≥ 95% of r)', minClearance > col.r * 0.95,
+    `${minClearance.toFixed(3)} m`);
 }
 
 // ---------------------------------------------------------------- Test 4

@@ -36,6 +36,22 @@ export class SkySystem {
     u.mieCoefficient.value = 0.005; // aerosol scattering (sun halo)
     u.mieDirectionalG.value = 0.8; // halo tightness
 
+    // Stratus veil: a translucent grey dome INSIDE the sky dome. The
+    // Preetham model can only do clear skies — real overcast needs cloud
+    // between you and it. Opacity follows the overcast factor.
+    this.cloudDome = new THREE.Mesh(
+      new THREE.SphereGeometry(40000, 24, 12),
+      new THREE.MeshBasicMaterial({
+        color: 0x565b61,
+        side: THREE.BackSide,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        fog: false,
+      })
+    );
+    scene.add(this.cloudDome);
+
     // --- Sun light --------------------------------------------------------
     this.sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
     scene.add(this.sunLight);
@@ -69,6 +85,12 @@ export class SkySystem {
     this.horizonColor = new THREE.Color();
     this.fogDensity = 0.0016;
 
+    // Overcast 0..1: Preetham is a CLEAR-sky model — raising its turbidity
+    // makes the sky milky-BRIGHT (more scattered light), which is exactly
+    // wrong for storm gloom. This factor supplies the missing behaviour:
+    // it dims the sun and its halo, greys the sky colours and cuts ambient.
+    this.overcast = 0;
+
     this.elevationDeg = 32;
     this.azimuthDeg = 155;
     this.setSun(this.elevationDeg, this.azimuthDeg);
@@ -94,11 +116,20 @@ export class SkySystem {
     // --- direct light -----------------------------------------------------
     // Intensity fades to ~0 below the horizon; color runs white → amber as
     // the light path through the atmosphere lengthens.
+    const o = this.overcast;
     const dayness = THREE.MathUtils.smoothstep(elevationDeg, 0, 25);
     const horizonAmber = new THREE.Color(1.0, 0.45, 0.18);
     const noonWhite = new THREE.Color(1.0, 0.98, 0.95);
-    this.sunLight.color.copy(horizonAmber).lerp(noonWhite, dayness);
-    this.sunLight.intensity = 3.2 * THREE.MathUtils.smoothstep(elevationDeg, -2, 12);
+    const cloudGrey = new THREE.Color(0.55, 0.57, 0.6);
+    this.sunLight.color.copy(horizonAmber).lerp(noonWhite, dayness).lerp(cloudGrey, o * 0.7);
+    this.sunLight.intensity =
+      3.2 * THREE.MathUtils.smoothstep(elevationDeg, -2, 12) * (1 - 0.78 * o);
+    // kill the sun's forward-scatter halo under cloud, veil the dome
+    this.sky.material.uniforms.mieCoefficient.value = 0.005 * (1 - 0.85 * o);
+    this.cloudDome.material.opacity = o * 0.88;
+    this.cloudDome.material.color
+      .setRGB(0.4, 0.42, 0.46)
+      .multiplyScalar(0.25 + 0.75 * dayness);
     this.trackShadowTarget(this.sunLight.target.position);
 
     // --- representative colors for the ocean shader & fog ------------------
@@ -113,6 +144,13 @@ export class SkySystem {
     const dayHorizon = new THREE.Color(0.58, 0.72, 0.85);
     this.horizonColor.copy(duskHorizon).lerp(dayHorizon, dayness);
 
+    // overcast: grey the water-facing sky colours and dim the ambient
+    const slate = new THREE.Color().setRGB(0.16, 0.18, 0.2).multiplyScalar(0.4 + 0.6 * dayness);
+    const slateHorizon = new THREE.Color().setRGB(0.3, 0.32, 0.35).multiplyScalar(0.4 + 0.6 * dayness);
+    this.zenithColor.lerp(slate, o * 0.85);
+    this.horizonColor.lerp(slateHorizon, o * 0.8);
+    this.scene.environmentIntensity = 0.5 * (1 - 0.55 * o);
+
     this.sunColor.copy(this.sunLight.color).multiplyScalar(this.sunLight.intensity / 3.2);
 
     // --- rebake environment ------------------------------------------------
@@ -124,13 +162,16 @@ export class SkySystem {
     this.scene.fog.density = this.fogDensity;
   }
 
-  /** Bake the current sky into scene.environment (ambient IBL). */
+  /** Bake the current sky (incl. cloud veil) into scene.environment. */
   _bakeEnvironment() {
     if (this._envRT) this._envRT.dispose();
-    // Temporarily reparent the sky into the bake-only scene.
+    // Temporarily reparent sky + veil into the bake-only scene so ambient
+    // light greys out under overcast along with the visible dome.
     this._envScene.add(this.sky);
+    this._envScene.add(this.cloudDome);
     this._envRT = this.pmrem.fromScene(this._envScene);
-    this.scene.add(this.sky); // hand it back to the visible scene
+    this.scene.add(this.sky);
+    this.scene.add(this.cloudDome);
     this.scene.environment = this._envRT.texture;
   }
 

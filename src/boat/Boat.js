@@ -27,6 +27,8 @@ export class Boat {
     this.helmState = helmState;
     this.physics = new BoatPhysics(physicsWorld, ocean, wind, helmState);
     this.sails = new Sails(this.model);
+    // Two-way coupling: cloth pressure/CP feeds back into hull forces.
+    this.sails.onClothAero = (data) => this.physics.setClothAero(data);
     this._rudderGroup = this.model.getObjectByName('rudder');
     this._windex = this.model.getObjectByName('windex');
     this._state = {};
