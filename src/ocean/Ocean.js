@@ -73,6 +73,9 @@ const VERTEX_SHADER = /* glsl */ `
   uniform sampler2D uCascadeTex[OCEAN_CASCADES];
   uniform float uCascadePatch[OCEAN_CASCADES]; // tile size (m) per cascade
   uniform float uCascadeTexel[OCEAN_CASCADES]; // metres per texel, slope taps
+  uniform float uTime;
+  uniform vec4  uSwell;      // event wave: dirX, dirZ, k, amplitude
+  uniform vec2  uSwellWave;  // event wave: omega, phase
 
   varying vec3  vWorldPos;   // displaced world-space position
   varying vec3  vGrad;       // (dHeight/dx, foam, dHeight/dz)
@@ -100,6 +103,17 @@ const VERTEX_SHADER = /* glsl */ `
     OCEAN_SAMPLE(0)
     OCEAN_SAMPLE(1)
     OCEAN_SAMPLE(2)
+
+    // Event wave (Tsunami/Rogue): one big Gerstner wave layered on the sea.
+    if (uSwell.w > 0.0001) {
+      vec2 sd = uSwell.xy;
+      float sk = uSwell.z;
+      float sa = uSwell.w;
+      float sf = sk * dot(sd, gridWorld.xz) - uSwellWave.x * uTime + uSwellWave.y;
+      disp.xz += sd * (sa * cos(sf)); // Gerstner horizontal pinch
+      disp.y  += sa * sin(sf);
+      slope   += sd * (sk * sa * cos(sf));
+    }
 
     vec3 displaced = gridWorld + disp;
     vWorldPos = displaced;
@@ -438,6 +452,10 @@ export class Ocean {
       uCascadePatch: { value: cascades.map((c) => c.patch) },
       uCascadeTexel: { value: cascades.map((c) => c.patch / c.N) },
       uSeaHeight: { value: 3.0 }, // rough Hs proxy — places whitecaps on crests
+      // Event wave (Tsunami/Rogue): one big analytic Gerstner wave on top of
+      // the FFT sea. Amplitude 0 = inert.
+      uSwell: { value: new THREE.Vector4(1, 0, 0.0314, 0) }, // dirX,dirZ,k,amp
+      uSwellWave: { value: new THREE.Vector2(0.556, 0) }, // omega, phase
       // Sky-driven values; SkySystem overwrites these via applySkyState().
       uSunDir: { value: new THREE.Vector3(0.3, 0.7, 0.2).normalize() },
       uSunColor: { value: new THREE.Color(1.0, 0.95, 0.85) },
@@ -512,16 +530,30 @@ export class Ocean {
    * callers never have to think about wave sets, scales or clocks.
    */
   getHeightAt(x, z) {
-    return this.fft.heightAt(x, z);
+    let h = this.fft.heightAt(x, z);
+    const s = this._swellSlot;
+    if (s.amplitude > 0.0001) {
+      h += s.amplitude * Math.sin(s.k * (s.dirX * x + s.dirZ * z) - s.omega * this.time + s.phase);
+    }
+    return h;
   }
 
   /**
    * Water-particle (orbital) velocity at world (x, z). Hull drag is computed
-   * relative to this, so waves carry the boat.
+   * relative to this, so waves carry the boat (incl. the event wave's surge).
    * @param {THREE.Vector3} target filled and returned
    */
   getWaterVelocityAt(x, z, target) {
-    return this.fft.velocityAt(x, z, target);
+    this.fft.velocityAt(x, z, target);
+    const s = this._swellSlot;
+    if (s.amplitude > 0.0001) {
+      const f = s.k * (s.dirX * x + s.dirZ * z) - s.omega * this.time + s.phase;
+      const aw = s.amplitude * s.omega;
+      target.x += s.dirX * aw * Math.sin(f);
+      target.y += -aw * Math.cos(f);
+      target.z += s.dirZ * aw * Math.sin(f);
+    }
+    return target;
   }
 
   /**
@@ -607,10 +639,12 @@ export class Ocean {
    */
   _syncSwellSlot() {
     const slot = this._swellSlot;
-    const u4 = this.uniforms.uWaves.value[this.waves.length - 1];
+    const uS = this.uniforms.uSwell.value; // (dirX, dirZ, k, amplitude)
+    const uW = this.uniforms.uSwellWave.value; // (omega, phase)
     if (!this._swellDesired) {
       slot.amplitude = 0;
-      u4.w = 0;
+      uS.set(1, 0, slot.k, 0);
+      uW.set(slot.omega, 0);
       return;
     }
     const d = this._swellDesired;
@@ -619,15 +653,16 @@ export class Ocean {
       slot.k = (2 * Math.PI) / d.wavelength;
       slot.omega = Math.sqrt(GRAVITY * slot.k);
     }
+    // The event wave now rides ON TOP of the FFT sea as one analytic Gerstner
+    // wave — so its bearing and height are ABSOLUTE (no waveRot / heightScale
+    // compensation). Same numbers drive the GPU vertex and the CPU height query.
     const b = THREE.MathUtils.degToRad(d.bearingDeg);
-    const wx = Math.sin(b);
-    const wz = -Math.cos(b);
-    const c = Math.cos(-this.waveRot);
-    const s = Math.sin(-this.waveRot);
-    slot.dirX = wx * c - wz * s;
-    slot.dirZ = wx * s + wz * c;
-    slot.amplitude = d.amplitude / Math.max(this.heightScale, 0.02);
-    u4.set(slot.dirX, slot.dirZ, slot.wavelength, slot.amplitude);
+    slot.dirX = Math.sin(b);
+    slot.dirZ = -Math.cos(b);
+    slot.amplitude = d.amplitude;
+    slot.phase = 0;
+    uS.set(slot.dirX, slot.dirZ, slot.k, slot.amplitude);
+    uW.set(slot.omega, slot.phase);
   }
 
   /** Target wave-field rotation so the spectrum travels dead downwind. */
