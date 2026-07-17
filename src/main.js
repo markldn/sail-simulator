@@ -77,6 +77,7 @@ import { Ocean } from './ocean/Ocean.js';
 import { Boat } from './boat/Boat.js';
 import { Spray } from './effects/Spray.js';
 import { Runoff } from './effects/Runoff.js';
+import { Rain } from './effects/Rain.js';
 import { SkySystem } from './environment/SkySystem.js';
 import { WindManager, MS_TO_KNOTS } from './wind/WindManager.js';
 import { PhysicsWorld } from './physics/PhysicsWorld.js';
@@ -167,6 +168,9 @@ async function init() {
   // Water dripping/running off the decks and topsides after spray or green
   // water (fed a "wetness" value in the render loop).
   const runoff = new Runoff(scene);
+  // Wind-driven rain — fades in around gale force, lashes down in a storm.
+  const rain = new Rain(scene);
+  const _windVec = new THREE.Vector3();
 
   // ------------------------------------------------ debug wave-height probes
   // Three PBR spheres that follow ocean.getHeightAt() — the visual contract
@@ -339,6 +343,12 @@ async function init() {
     deckWet = Math.min(1, deckWet + (awash * 3.5 + railDown * 2.0) * frameDt);
     deckWet = Math.max(0, deckWet - frameDt * 0.28); // ~3.5 s to dry
     runoff.update(frameDt, boatState, boatVel, deckWet);
+
+    // Rain: fades in from ~gale (25 kn) to storm (50 kn), slanted by the wind.
+    const rainI = THREE.MathUtils.clamp((wind.speedKnotsActual - 25) / 25, 0, 1);
+    const wdir = THREE.MathUtils.degToRad(wind.directionDegActual + 180); // blowing TO
+    _windVec.set(Math.sin(wdir), 0, -Math.cos(wdir)).multiplyScalar(wind.speedMs);
+    rain.update(frameDt, camera.position, _windVec, rainI);
 
     // Keep the sun's shadow frustum on the boat.
     sky.trackShadowTarget(boatState.position);
