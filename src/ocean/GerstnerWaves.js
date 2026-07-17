@@ -167,6 +167,42 @@ export function sampleWaveVelocity(waves, x, z, time, heightScale, choppiness, r
 }
 
 /**
+ * Water-particle velocity at DEPTH below the surface. In a deep-water wave
+ * the orbital motion is circular at the surface and its radius (hence its
+ * velocity amplitude) decays exponentially with depth as e^(k·y), y ≤ 0 —
+ * long swells stir the water far down, short chop dies just below the
+ * surface. We apply that per-wave factor e^(−k·depth) to the surface orbital
+ * velocity. Used to advect submerged sail cloth so it flows with the water
+ * rather than the wind (see Boat/ClothSail).
+ *
+ * @param {number} depth metres below the local surface (≥ 0)
+ * @returns {{x:number, y:number, z:number}} shared scratch object.
+ */
+export function sampleSubsurfaceVelocity(waves, x, z, depth, time, heightScale, choppiness, rot = 0) {
+  const cR = Math.cos(rot);
+  const sR = Math.sin(rot);
+  const d = depth > 0 ? depth : 0;
+  let vx = 0;
+  let vy = 0;
+  let vz = 0;
+  for (let i = 0; i < waves.length; i++) {
+    const w = waves[i];
+    const dX = w.dirX * cR - w.dirZ * sR;
+    const dZ = w.dirX * sR + w.dirZ * cR;
+    const a = w.amplitude * heightScale * Math.exp(-w.k * d); // depth decay
+    const f = w.k * (dX * x + dZ * z) - w.omega * time + w.phase;
+    const s = Math.sin(f) * a * w.omega;
+    vx += dX * choppiness * s;
+    vz += dZ * choppiness * s;
+    vy += -a * w.omega * Math.cos(f);
+  }
+  _vel.x = vx;
+  _vel.y = vy;
+  _vel.z = vz;
+  return _vel;
+}
+
+/**
  * True water surface height at a fixed WORLD position (x, z).
  *
  * This is the function buoyancy will lean on. It is NOT simply

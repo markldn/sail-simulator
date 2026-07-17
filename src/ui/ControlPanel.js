@@ -196,6 +196,7 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
   // --- Boat -----------------------------------------------------------------------
   const boatFolder = gui.addFolder('Boat');
   boatFolder.add(cameraState, 'followBoat').name('Camera follows boat');
+  boatFolder.add(cameraState, 'firstPerson').name('First-person view (C)').listen();
   boatFolder.add({ reset: () => boat.reset() }, 'reset').name('Reset boat ⟲ (R)');
 
   // --- Debug ---------------------------------------------------------------------

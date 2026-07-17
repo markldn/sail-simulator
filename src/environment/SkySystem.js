@@ -60,12 +60,15 @@ export class SkySystem {
     // Shadows: a tight ortho frustum around the boat (the only caster).
     // trackShadowTarget() re-centres it every frame as the boat sails off.
     this.sunLight.castShadow = true;
-    this.sunLight.shadow.mapSize.set(2048, 2048);
+    this.sunLight.shadow.mapSize.set(4096, 4096);
     const sc = this.sunLight.shadow.camera;
-    sc.left = -14;
-    sc.right = 14;
-    sc.top = 14;
-    sc.bottom = -14;
+    // Wide enough to contain the long mast/sail shadow at a low sun without
+    // clipping; the 4096 map keeps texels fine (~9 mm) and the ocean's 5×5 PCF
+    // softens the rest.
+    sc.left = -22;
+    sc.right = 22;
+    sc.top = 22;
+    sc.bottom = -22;
     sc.near = 20;
     sc.far = 400;
     this.sunLight.shadow.bias = -0.0002;

@@ -139,3 +139,9 @@ body {
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
 }
+
+/* Clean view (F): hide every overlay for an unobstructed, cinematic frame. */
+body.clean-view #hud,
+body.clean-view .lil-gui {
+  display: none !important;
+}

@@ -84,7 +84,7 @@ export const TUNING = {
   // Body-frame rotational damping, N·m·s/rad.
   rollDamp: 2500,
   yawDamp: 2500,
-  pitchDamp: 8000,
+  pitchDamp: 12000, // calms wave-driven plunge cycles (~10% critical)
 
   // Rudder: a small balanced spade, F = ½·ρ·A·CL(2α)·U² at the blade.
   rudderArea: 0.32, // m²
@@ -177,7 +177,10 @@ export class BoatPhysics {
     const hullVol = 8 * hullHalf.x * hullHalf.y * hullHalf.z;
     physicsWorld.world.createCollider(
       RAPIER.ColliderDesc.cuboid(hullHalf.x, hullHalf.y, hullHalf.z)
-        .setTranslation(0, 0.05, 0)
+        // Slightly aft mass centre: the waterplane is fullest aft of
+        // midships, so a centred mass floats bow-down. Tuned against the
+        // flat-water test for level static trim.
+        .setTranslation(-0.25, 0.05, 0)
         .setDensity(HULL.hullMass / hullVol),
       this.body
     );
@@ -205,11 +208,17 @@ export class BoatPhysics {
       for (let iu = 0; iu < NU; iu++) {
         const u = (-1 + (2 * (iu + 0.5)) / NU) * U_SPAN;
         const y = sectionY(t, u);
+        const x = stationX(t);
         this.samples.push({
-          local: new THREE.Vector3(stationX(t), y, hb * u),
+          local: new THREE.Vector3(x, y, hb * u),
           area,
           // Column caps a little ABOVE the deck — see RESERVE_BUOYANCY.
           columnHeight: HULL.sheer - y + RESERVE_BUOYANCY,
+          // Bow flare: forward sections WIDEN above the waterline on a real
+          // hull, so immersing the bow generates rapidly growing lift — the
+          // anti-nosedive reserve a fine entry otherwise lacks. Effective
+          // column area grows with depth, ramping in over the fore third.
+          flare: x > 1.4 ? (1.2 * (x - 1.4)) / (HULL.length / 2 - 1.4) : 0,
         });
       }
     }
@@ -301,8 +310,9 @@ export class BoatPhysics {
         }
       }
 
-      const fBuoy = RHO_WATER * G * s.area * depth;
-      const fDamp = -s.area * (TUNING.heaveLin + TUNING.heaveQuad * Math.abs(relVy)) * relVy;
+      const areaEff = s.area * (1 + s.flare * Math.min(depth / 0.55, 1));
+      const fBuoy = RHO_WATER * G * areaEff * depth;
+      const fDamp = -areaEff * (TUNING.heaveLin + TUNING.heaveQuad * Math.abs(relVy)) * relVy;
 
       b.addForceAtPoint({ x: 0, y: fBuoy + fDamp, z: 0 }, wp, true);
     }

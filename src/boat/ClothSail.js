@@ -29,6 +29,8 @@
 import * as THREE from 'three';
 
 const AIR_RHO = 1.225;
+const WATER_RHO = 1025; // seawater — ~840× air, so submerged cloth is water-led
+const WATER_CD = 0.9;
 const PRESSURE_CD = 1.15;
 const GRAVITY = -9.81;
 const DAMPING = 0.985; // velocity retained per substep
@@ -62,6 +64,19 @@ export class ClothSail {
     this.invMass = new Float32Array(this.n);
     this.pinned = new Uint8Array(this.n);
     this.ropes = []; // {index, ax, ay, az, rest} — set each frame by Sails
+
+    // Aerodynamic drive scale: 1 in air, ~0 once the cloth is in the water.
+    // A submerged sail is not filled by wind — it goes limp and drifts with
+    // the boat/water instead of holding a flying shape (set by Sails).
+    this.windScale = 1;
+
+    // Hydrodynamic advection (set per-frame by Boat when a sail touches the
+    // sea): submerged particles are driven by WATER drag toward the local
+    // orbital current velocity, in boat frame. subWeight ∈ [0,1] per particle
+    // gates wind out and water in, so a half-dipped sail is handled correctly.
+    this.submerged = false;
+    this.subWeight = new Float32Array(this.n); // 0 dry … 1 fully underwater
+    this.waterVel = new Float32Array(this.n * 3); // boat-frame water velocity
 
     // Capsule colliders (rigging): {ax,ay,az, bx,by,bz, r} segments the
     // cloth may not penetrate — mast, shrouds. Set once by Sails.
@@ -158,6 +173,7 @@ export class ClothSail {
     for (let p = 0; p < this.n; p++) {
       this.invMass[p] = 1 / Math.max(clothDensity * areaAcc[p], 0.004);
     }
+    this.pArea = areaAcc; // per-particle tributary area, reused for water drag
 
     // --- render mesh -----------------------------------------------------------
     this.geometry = new THREE.BufferGeometry();
@@ -234,7 +250,12 @@ export class ClothSail {
       const vy = ((pos[a3+1] - prev[a3+1]) + (pos[b3+1] - prev[b3+1]) + (pos[c3+1] - prev[c3+1])) * invDt / 3;
       const vz = ((pos[a3+2] - prev[a3+2]) + (pos[b3+2] - prev[b3+2]) + (pos[c3+2] - prev[c3+2])) * invDt / 3;
       const q = nx * (wx - vx) + ny * (wy - vy) + nz * (wz - vz);
-      const f = (0.5 * AIR_RHO * PRESSURE_CD * area * q * Math.abs(q)) / 3;
+      // Wind only acts on the part of the sail that is OUT of the water: the
+      // submerged fraction of this triangle is driven by water drag instead.
+      const airFrac =
+        1 - (this.subWeight[tris[t]] + this.subWeight[tris[t + 1]] + this.subWeight[tris[t + 2]]) / 3;
+      const f =
+        (this.windScale * airFrac * 0.5 * AIR_RHO * PRESSURE_CD * area * q * Math.abs(q)) / 3;
       const fx = nx * f;
       const fy = ny * f;
       const fz = nz * f;
@@ -258,6 +279,32 @@ export class ClothSail {
     this.aeroTorque.set(sumTx, sumTy, sumTz);
     this.pressureWeight = sumW;
     if (sumW > 1e-4) this.pressureCentroid.set(cenX / sumW, cenY / sumW, cenZ / sumW);
+
+    // ---- hydrodynamic drag on submerged cloth --------------------------------
+    // Each underwater particle is dragged toward the local water-particle
+    // (orbital) velocity: F = ρ_w·Cd·A·(v_water − v_cloth)·|v_water − v_cloth|.
+    // Seawater's density makes this dominate — the wet cloth is carried by the
+    // water flow, which is exactly the "moves with the sea, not the wind"
+    // behaviour of a sail dragged under in a knockdown. (Water drag does NOT
+    // feed the hull aero coupling above — the hull has its own buoyancy.)
+    if (this.submerged) {
+      const wv = this.waterVel;
+      const sw = this.subWeight;
+      const pa = this.pArea;
+      for (let p = 0; p < this.n; p++) {
+        const s = sw[p];
+        if (s <= 0 || pinned[p]) continue;
+        const k = p * 3;
+        const rx = wv[k] - (pos[k] - prev[k]) * invDt;
+        const ry = wv[k + 1] - (pos[k + 1] - prev[k + 1]) * invDt;
+        const rz = wv[k + 2] - (pos[k + 2] - prev[k + 2]) * invDt;
+        const speed = Math.hypot(rx, ry, rz);
+        const coef = WATER_RHO * WATER_CD * pa[p] * s * (0.4 + 0.6 * speed);
+        force[k] += rx * coef;
+        force[k + 1] += ry * coef;
+        force[k + 2] += rz * coef;
+      }
+    }
 
     // ---- Verlet integration --------------------------------------------------
     const dt2 = dt * dt;

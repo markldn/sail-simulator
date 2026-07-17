@@ -30,12 +30,14 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 /**
- * Underwater veil: fades in when the camera is below the local wave
- * surface — teal absorption, depth-darkening, soft vignette. Runs on the
- * LDR image after tone mapping.
+ * Underwater veil: fades in when the camera dips below the local wave
+ * surface (a plunge or a knockdown). Submerging should read as *being in the
+ * water* — heavy teal absorption that kills the bright storm haze, depth
+ * darkening, a soft vignette, drifting light shafts from the surface, and a
+ * gentle refraction wobble. Runs on the LDR image after tone mapping.
  */
 const UnderwaterShader = {
-  uniforms: { tDiffuse: { value: null }, uAmount: { value: 0 } },
+  uniforms: { tDiffuse: { value: null }, uAmount: { value: 0 }, uTime: { value: 0 } },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
     void main() {
@@ -45,12 +47,28 @@ const UnderwaterShader = {
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
     uniform float uAmount;
+    uniform float uTime;
     varying vec2 vUv;
     void main() {
-      vec4 c = texture2D(tDiffuse, vUv);
-      vec3 water = vec3(0.05, 0.16, 0.20);
-      float vig = smoothstep(1.25, 0.3, length(vUv - 0.5) * 2.0);
-      vec3 murk = mix(c.rgb, water, 0.72) * (0.3 + 0.45 * vig);
+      // Refraction wobble: the image seen through moving water shimmers.
+      float rip = uAmount * 0.006;
+      vec2 w = vUv + vec2(
+        sin(vUv.y * 22.0 + uTime * 1.8),
+        cos(vUv.x * 26.0 - uTime * 1.5)
+      ) * rip;
+      vec4 c = texture2D(tDiffuse, w);
+
+      // Teal absorption + depth darkening + vignette. The heavy mix toward the
+      // water colour is what suppresses the white haze so it looks submerged.
+      vec3 water = vec3(0.04, 0.16, 0.19);
+      float vig = smoothstep(1.3, 0.25, length(vUv - 0.5) * 2.0);
+      vec3 murk = mix(c.rgb, water, 0.74) * (0.42 + 0.45 * vig);
+
+      // Faint light shafts drifting down from the surface (top of frame).
+      float shafts = smoothstep(0.15, 1.0, vUv.y)
+                   * (0.5 + 0.5 * sin(vUv.x * 34.0 + uTime * 0.8));
+      murk += shafts * 0.05 * vec3(0.4, 0.7, 0.7);
+
       gl_FragColor = vec4(mix(c.rgb, murk, uAmount), c.a);
     }`,
 };
@@ -107,7 +125,9 @@ async function init() {
   // surfaces before anything renders.
   const physics = await PhysicsWorld.create();
 
-  const ocean = new Ocean(900, 512);
+  // Denser mesh (~0.94 m spacing) so the FFT cascades' short chop is carried
+  // as real geometry without aliasing, not smoothed away.
+  const ocean = new Ocean(720, 768);
   scene.add(ocean.mesh);
 
   const sky = new SkySystem(renderer, scene);
@@ -124,6 +144,22 @@ async function init() {
   // The boat: model + rigid body + buoyancy + sails (see src/boat/).
   const boat = new Boat(scene, physics, ocean, wind, helm.state);
   helm.onReset = () => boat.reset();
+
+  // First-person "helm seat": an empty parented to the hull, so it inherits
+  // the boat's full pose — heave, pitch and heel all move the view exactly as
+  // they would for someone sitting in the cockpit. Placed on the starboard
+  // coaming at seated eye height, facing the bow with a slight downward gaze.
+  const fpSeat = new THREE.Object3D();
+  fpSeat.position.set(-2.6, 1.5, 0.5); // body frame: aft cockpit, +X = bow
+  fpSeat.quaternion
+    .setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2) // face the bow
+    .multiply(
+      new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(1, 0, 0),
+        THREE.MathUtils.degToRad(-7) // tip the gaze down onto the deck a touch
+      )
+    );
+  boat.model.add(fpSeat);
 
   // Bow spray, fed by the slam detector inside the buoyancy loop.
   const spray = new Spray(scene);
@@ -155,7 +191,52 @@ async function init() {
 
   // ---------------------------------------------------------------------- UI
   const hud = new HUD();
-  const cameraState = { followBoat: true };
+  const cameraState = { followBoat: true, firstPerson: false };
+
+  // First-person look-around: drag to turn your head. The yaw/pitch offset is
+  // applied ON TOP of the seat's pose, so you can look anywhere on board while
+  // the view still rides the boat's heave, pitch and heel.
+  const fpLook = { yaw: 0, pitch: 0, dragging: false, px: 0, py: 0 };
+  helm.onToggleView = () => {
+    cameraState.firstPerson = !cameraState.firstPerson;
+    if (cameraState.firstPerson) {
+      fpLook.yaw = 0;
+      fpLook.pitch = 0;
+    } // entering the seat always faces forward
+  };
+  // Clean view (F): hide every overlay and go fullscreen for a cinematic
+  // frame. Kept in sync with the browser so pressing Esc also restores the UI.
+  helm.onToggleClean = () => {
+    const on = !document.body.classList.contains('clean-view');
+    document.body.classList.toggle('clean-view', on);
+    if (on && document.documentElement.requestFullscreen) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else if (!on && document.fullscreenElement && document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
+  };
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement) document.body.classList.remove('clean-view');
+  });
+
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    if (!cameraState.firstPerson) return;
+    fpLook.dragging = true;
+    fpLook.px = e.clientX;
+    fpLook.py = e.clientY;
+  });
+  window.addEventListener('pointerup', () => {
+    fpLook.dragging = false;
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (!cameraState.firstPerson || !fpLook.dragging) return;
+    fpLook.yaw -= (e.clientX - fpLook.px) * 0.005;
+    fpLook.pitch -= (e.clientY - fpLook.py) * 0.005;
+    fpLook.px = e.clientX;
+    fpLook.py = e.clientY;
+    fpLook.yaw = THREE.MathUtils.clamp(fpLook.yaw, -Math.PI * 0.92, Math.PI * 0.92);
+    fpLook.pitch = THREE.MathUtils.clamp(fpLook.pitch, -1.2, 1.35);
+  });
   // (TWS/TWD are fed per-frame in the loop now — the actual, gusty values.)
   createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm });
 
@@ -195,6 +276,9 @@ async function init() {
   // -------------------------------------------------------------- render loop
   const clock = new THREE.Clock();
   const _fwd = new THREE.Vector3(); // scratch: boat forward for the wake
+  const _seatQ = new THREE.Quaternion(); // scratch: FPV seat world orientation
+  const _lookQ = new THREE.Quaternion(); // scratch: FPV look-around offset
+  const _lookEuler = new THREE.Euler();
   let underwaterAmt = 0;
 
   function animate() {
@@ -257,19 +341,34 @@ async function init() {
     const underTarget = camera.position.y < camWaterY - 0.05 ? 1 : 0;
     underwaterAmt += (underTarget - underwaterAmt) * (1 - Math.exp(-frameDt * 10));
     underwaterPass.uniforms.uAmount.value = underwaterAmt;
+    underwaterPass.uniforms.uTime.value = elapsed;
     underwaterPass.enabled = underwaterAmt > 0.01;
 
-    // Chase target: keep orbiting around the boat as it drifts/sails.
-    // The finite check protects the camera: lerping toward a NaN target
-    // blacks out the entire render and never recovers.
-    if (
-      cameraState.followBoat &&
-      Number.isFinite(boatState.position.x + boatState.position.y + boatState.position.z)
-    ) {
-      controls.target.lerp(
-        { x: boatState.position.x, y: boatState.position.y + 1, z: boatState.position.z },
-        0.08
-      );
+    // Camera: first-person helm seat, or the orbiting chase cam.
+    // The finite check protects the camera: a NaN pose blacks out the whole
+    // render and never recovers.
+    const poseOk = Number.isFinite(
+      boatState.position.x + boatState.position.y + boatState.position.z
+    );
+    if (cameraState.firstPerson && poseOk) {
+      // Ride the seat: it inherits the hull's pose this frame, so the horizon
+      // pitches and heels exactly as it would from on board. The drag-driven
+      // look offset is layered on in the seat's local frame, so "turning your
+      // head" is relative to the boat, not the world.
+      controls.enabled = false;
+      fpSeat.getWorldPosition(camera.position);
+      fpSeat.getWorldQuaternion(_seatQ);
+      _lookQ.setFromEuler(_lookEuler.set(fpLook.pitch, fpLook.yaw, 0, 'YXZ'));
+      camera.quaternion.copy(_seatQ).multiply(_lookQ);
+    } else {
+      controls.enabled = true;
+      // Chase target: keep orbiting around the boat as it drifts/sails.
+      if (cameraState.followBoat && poseOk) {
+        controls.target.lerp(
+          { x: boatState.position.x, y: boatState.position.y + 1, z: boatState.position.z },
+          0.08
+        );
+      }
     }
 
     // Ride the probes on the CPU-evaluated wave height.
@@ -281,7 +380,7 @@ async function init() {
       }
     }
 
-    controls.update();
+    if (controls.enabled) controls.update();
     composer.render();
   }
 

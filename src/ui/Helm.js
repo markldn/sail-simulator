@@ -5,6 +5,8 @@
  *           a tiller — the boat's own tracking takes over)
  *   ↑ / ↓   sheet in / ease out (switches trim to MANUAL)
  *   T       toggle auto-trim
+ *   C       toggle first-person (helm-seat) camera
+ *   F       toggle clean full-screen view (hide overlays)
  *   R       reset the boat
  *
  * The exported `state` object is shared BY REFERENCE with BoatPhysics —
@@ -20,6 +22,8 @@ export class Helm {
   constructor() {
     this.state = { rudderDeg: 0, sheetMaxDeg: 40, autoTrim: true };
     this.onReset = null; // main.js wires this to boat.reset()
+    this.onToggleView = null; // main.js wires this to the camera toggle
+    this.onToggleClean = null; // main.js wires this to the clean-view toggle
     this._keys = new Set();
 
     window.addEventListener('keydown', (e) => {
@@ -34,6 +38,12 @@ export class Helm {
           break;
         case 'KeyT':
           this.state.autoTrim = !this.state.autoTrim;
+          break;
+        case 'KeyC':
+          this.onToggleView?.();
+          break;
+        case 'KeyF':
+          this.onToggleClean?.();
           break;
         case 'KeyR':
           this.onReset?.();

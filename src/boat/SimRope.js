@@ -19,8 +19,9 @@ const DAMPING = 0.96;
 const ITERATIONS = 5;
 
 export class SimRope {
-  constructor(parent, { segments = 8, radius = 0.008, color = 0x8a2f2f } = {}) {
+  constructor(parent, { segments = 8, radius = 0.008, color = 0x8a2f2f, floorY = -Infinity } = {}) {
     this.segments = segments;
+    this.floorY = floorY; // slack rope rests on this plane instead of sinking
     this.n = segments + 1;
     this.pos = new Float32Array(this.n * 3);
     this.prev = new Float32Array(this.n * 3);
@@ -113,6 +114,15 @@ export class SimRope {
         pos[kb] -= dx * diff * wb;
         pos[kb + 1] -= dy * diff * wb;
         pos[kb + 2] -= dz * diff * wb;
+      }
+      // Deck floor: a rope cannot sag through the boat. Clamp interior
+      // particles each iteration so the constraint solve settles it resting
+      // ON the deck rather than pulling it back under.
+      if (this.floorY > -Infinity) {
+        for (let i = 1; i < n - 1; i++) {
+          const y = i * 3 + 1;
+          if (pos[y] < this.floorY) pos[y] = this.floorY;
+        }
       }
     }
 

@@ -31,7 +31,9 @@ import {
   packWaveUniforms,
   getWaveHeight,
   sampleWaveVelocity,
+  sampleSubsurfaceVelocity,
 } from './GerstnerWaves.js';
+import { FFTOcean } from './FFTWaves.js';
 
 // How the sea answers the wind (used when seaFollowsWind is on):
 // height scale from wind speed — glassy under 1 kn, ~1.0 at 12 kn,
@@ -61,20 +63,31 @@ function makeWhiteTexture() {
 }
 
 const VERTEX_SHADER = /* glsl */ `
-  #define NUM_WAVES ${WAVE_SLOTS}
-  #define TWO_PI 6.28318530718
-  #define GRAVITY ${GRAVITY.toFixed(4)}
-
-  uniform float uTime;
-  uniform float uHeightScale;   // global amplitude multiplier
-  uniform float uChoppiness;    // Gerstner Q factor
-  uniform float uWaveRot;       // wave-field rotation (sea follows wind)
-  uniform vec4  uWaves[NUM_WAVES];   // (dirX, dirZ, wavelength, amplitude)
-  uniform float uPhases[NUM_WAVES];
+  // The surface is displaced by a stack of FFT CASCADES (FFTWaves.js), each
+  // uploaded as a texture: RGBA = (dx, dy, dz, foam) in metres, tiled in world
+  // space at its own lengthscale. Summing them gives waves across every scale
+  // — long swell through short chop — with no single tiling period. (texture2D
+  // in a vertex stage samples the base level; three rewrites it to the ES3
+  // texture() built-in, valid in both stages.)
+  #define OCEAN_CASCADES 3
+  uniform sampler2D uCascadeTex[OCEAN_CASCADES];
+  uniform float uCascadePatch[OCEAN_CASCADES]; // tile size (m) per cascade
+  uniform float uCascadeTexel[OCEAN_CASCADES]; // metres per texel, slope taps
 
   varying vec3  vWorldPos;   // displaced world-space position
-  varying vec3  vGrad;       // (dHeight/dx, jacobian term, dHeight/dz)
+  varying vec3  vGrad;       // (dHeight/dx, foam, dHeight/dz)
   varying float vHeight;     // vertical displacement (for subsurface tint)
+
+  #define OCEAN_SAMPLE(I) { \
+    float P = uCascadePatch[I]; \
+    vec4 s = texture2D(uCascadeTex[I], gridWorld.xz / P); \
+    disp += s.xyz; foam += s.w; \
+    float e = uCascadeTexel[I]; \
+    float hl = texture2D(uCascadeTex[I], (gridWorld.xz + vec2(-e, 0.0)) / P).y; \
+    float hr = texture2D(uCascadeTex[I], (gridWorld.xz + vec2( e, 0.0)) / P).y; \
+    float hd = texture2D(uCascadeTex[I], (gridWorld.xz + vec2(0.0, -e)) / P).y; \
+    float hu = texture2D(uCascadeTex[I], (gridWorld.xz + vec2(0.0,  e)) / P).y; \
+    slope += vec2(hr - hl, hu - hd) / (2.0 * e); }
 
   void main() {
     // Undisplaced grid point in world space. The ocean mesh is a plane in
@@ -82,39 +95,16 @@ const VERTEX_SHADER = /* glsl */ `
     vec3 gridWorld = (modelMatrix * vec4(position, 1.0)).xyz;
 
     vec3 disp = vec3(0.0);
-    // Accumulated derivatives for the exact Gerstner normal:
-    //   N = normalize(-dY/dx, 1 - Q·Σ(k·A·sin f), -dY/dz)
-    vec2  slope = vec2(0.0); // Σ D * k * A * cos(f)  → dY/dx, dY/dz
-    float jac   = 0.0;       // Σ Q * k * A * sin(f)  → crest pinch (foam!)
-
-    // Wave-field rotation — must match sampleWaveDisplacement() in
-    // GerstnerWaves.js exactly.
-    float cR = cos(uWaveRot);
-    float sR = sin(uWaveRot);
-
-    for (int i = 0; i < NUM_WAVES; i++) {
-      vec2  d0  = uWaves[i].xy;
-      vec2  dir = vec2(d0.x * cR - d0.y * sR, d0.x * sR + d0.y * cR);
-      float k   = TWO_PI / uWaves[i].z;
-      float a   = uWaves[i].w * uHeightScale;
-      float w   = sqrt(GRAVITY * k);            // deep-water dispersion
-      float f   = k * dot(dir, gridWorld.xz) - w * uTime + uPhases[i];
-      float s   = sin(f);
-      float c   = cos(f);
-
-      disp.xz += dir * (uChoppiness * a * c);   // horizontal chop
-      disp.y  += a * s;                          // vertical heave
-
-      slope   += dir * (k * a * c);
-      jac     += uChoppiness * k * a * s;
-    }
+    vec2 slope = vec2(0.0);
+    float foam = 0.0;
+    OCEAN_SAMPLE(0)
+    OCEAN_SAMPLE(1)
+    OCEAN_SAMPLE(2)
 
     vec3 displaced = gridWorld + disp;
-
     vWorldPos = displaced;
-    vGrad     = vec3(slope.x, jac, slope.y);
+    vGrad     = vec3(slope.x, foam, slope.y); // foam rides in the jac slot
     vHeight   = disp.y;
-
     gl_Position = projectionMatrix * viewMatrix * vec4(displaced, 1.0);
   }
 `;
@@ -137,6 +127,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform mat4  uShadowMatrix;
   uniform float uShadowStrength; // 0 = shadow sampling off
   uniform float uWhitecaps;     // 0 calm … 1 gale: how readily crests break
+  uniform float uSeaHeight;     // rough Hs proxy — scales the crest foam gate
   uniform vec3  uSunDir;        // TOWARDS the sun, normalized
   uniform vec3  uSunColor;      // linear
   uniform vec3  uZenithColor;   // analytic sky gradient (matches SkySystem)
@@ -144,6 +135,8 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3  uDeepColor;     // water body color (light fully absorbed)
   uniform vec3  uScatterColor;  // color scattered back out near the surface
   uniform float uFogDensity;
+  uniform vec2  uGridCenter;    // xz of the camera-snapped grid centre
+  uniform float uGridHalf;      // half the grid side length (metres)
 
   varying vec3  vWorldPos;
   varying vec3  vGrad;
@@ -169,12 +162,20 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec2 grad = vec2(0.0);
     float cR = cos(uWaveRot);
     float sR = sin(uWaveRot);
-    // (dir.x, dir.y, wavelength, amplitude) — deterministic, tiny
-    vec4 defs[3];
-    defs[0] = vec4( 0.95,  0.31, 0.90, 0.014);
-    defs[1] = vec4(-0.40,  0.92, 0.51, 0.008);
-    defs[2] = vec4( 0.60, -0.80, 0.31, 0.004);
-    for (int i = 0; i < 3; i++) {
+    // (dir.x, dir.y, wavelength, amplitude) — deterministic, tiny. Five
+    // octaves spanning ~1.2 m ripples down to 18 cm cat's-paws bridge the gap
+    // between the coarse vertex Gerstner set and the pixel, so the surface
+    // keeps texture (and broken-up reflections) well into the mid-field.
+    // Supplement the FFT geometry with fine ripple in the NORMAL only (the
+    // FFT is low-passed to ~4 m so the mesh stays alias-free; this carries the
+    // sub-metre chop). Kept subtle so it textures rather than granulates.
+    vec4 defs[5];
+    defs[0] = vec4( 0.95,  0.31, 2.10, 0.0120);
+    defs[1] = vec4(-0.40,  0.92, 1.30, 0.0080);
+    defs[2] = vec4( 0.60, -0.80, 0.80, 0.0050);
+    defs[3] = vec4(-0.86, -0.51, 0.48, 0.0030);
+    defs[4] = vec4( 0.24,  0.97, 0.30, 0.0018);
+    for (int i = 0; i < 5; i++) {
       vec2  d0 = defs[i].xy;
       vec2  d  = vec2(d0.x * cR - d0.y * sR, d0.x * sR + d0.y * cR);
       float k = TWO_PI / defs[i].z;
@@ -187,33 +188,48 @@ const FRAGMENT_SHADER = /* glsl */ `
   }
 
   // --- boat interaction foam ------------------------------------------------
-  // Purely cosmetic, but it is what makes the hull look IN the water rather
-  // than intersecting it: a churned ring where the hull pierces the
-  // surface, and a spreading wake astern that grows with speed.
+  // Real wake foam is turbulent, patchy white water — never a clean line. So
+  // every feature here is SOFT (gaussian falloff, no hard cores) and gated by
+  // a noise "clump" mask, so it breaks into scattered froth instead of a
+  // painted stripe. Two features only, both speed-gated:
+  //   1. bow foam — a soft band along the forward waterline where the stem
+  //      parts the water (a real boat throws foam at the bow, not the stern),
+  //   2. stern churn — a short, soft, quickly-dissolving disturbed patch
+  //      dragged behind the transom, about a beam wide.
+  // (A crisp Kelvin V or a long persistent trail needs a world-space trail
+  // buffer to look right; a procedural line only ever reads as a laser, so it
+  // is deliberately left out.)
   float boatFoam(vec2 p, float t) {
+    float sp = clamp(uBoatSpeed / 3.0, 0.0, 1.0);       // ~full by 6 kn
+    if (sp < 0.04) return 0.0;                           // lying still: clean water
+
     vec2 rel = p - uBoatPosDir.xy;
     vec2 fwd = uBoatPosDir.zw;
-    float along  = dot(rel, fwd);
+    float along  = dot(rel, fwd);                       // + ahead (toward bow)
     float across = rel.x * fwd.y - rel.y * fwd.x;
+    float b = abs(across);
 
-    // Contact ring: a soft band hugging the hull's waterline ellipse.
-    float e = (along * along) / (4.6 * 4.6) + (across * across) / (1.9 * 1.9);
-    float ring = smoothstep(1.5, 1.0, e) * smoothstep(0.45, 0.85, e);
+    // Turbulent texture: two scrolling octaves, thresholded into clumps so no
+    // feature can render as a continuous edge.
+    float n1 = vnoise(p * 1.9 + vec2(t * 0.40, -t * 0.26));
+    float n2 = vnoise(p * 0.8 - vec2(t * 0.12, t * 0.17));
+    float clumps = smoothstep(0.28, 0.72, 0.5 * n1 + 0.5 * n2);
 
-    // Wake: only astern, longer and denser with speed.
-    float wake = 0.0;
-    float sp = clamp(uBoatSpeed / 3.0, 0.0, 1.5);
-    if (along < 0.0 && sp > 0.05) {
-      float back  = -along;
-      float len   = 10.0 + 22.0 * sp;
-      float width = 1.3 + 0.28 * back;
-      wake = sp
-           * (1.0 - smoothstep(0.0, len, back))
-           * smoothstep(width, width * 0.35, abs(across));
-    }
+    // 1) Bow foam: a soft band on the forward half of the waterline ellipse.
+    float e    = (along * along) / (3.7 * 3.7) + (across * across) / (1.2 * 1.2);
+    float band = exp(-pow((e - 1.0) * 2.4, 2.0));       // soft, centred on hull edge
+    float fwdW = smoothstep(-2.2, 2.4, along);          // 0 aft → 1 at the bow
+    float bow  = band * fwdW;
 
-    float n = vnoise(p * 1.3 + vec2(t * 0.2, -t * 0.13));
-    return clamp(ring * (0.55 + 0.5 * n) + wake * (0.4 + 0.6 * n), 0.0, 1.0);
+    // 2) Stern churn: soft gaussian across ~a beam, fading within a few metres.
+    float back  = max(-along - 2.5, 0.0);               // ~0 at the transom
+    float tLen  = 3.5 + 9.0 * sp;
+    float wedge = exp(-pow(b / (1.25 + 0.14 * back), 2.0))
+                * (1.0 - smoothstep(0.0, tLen, back));
+
+    float foam = (bow + wedge * 0.9) * clumps;
+    foam *= (0.2 + 0.8 * sp) * 0.65;                    // subtle, speed-scaled
+    return clamp(foam, 0.0, 1.0);
   }
 
   // --- sun shadow (the boat shading the water) --------------------------------
@@ -233,16 +249,18 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec2 edge = min(uvz.xy, 1.0 - uvz.xy);
     float rim = smoothstep(0.0, 0.09, min(edge.x, edge.y));
     if (rim <= 0.0) return 1.0;
+    // 5×5 PCF: 25 taps give a smooth penumbra on the water instead of the
+    // stair-stepped blocks a sparse 3×3 kernel leaves when spread wide.
     float lit = 0.0;
-    vec2 texel = vec2(1.0 / 2048.0) * 3.2;
-    for (int i = -1; i <= 1; i++) {
-      for (int j = -1; j <= 1; j++) {
+    vec2 texel = vec2(1.0 / 4096.0) * 2.2;
+    for (int i = -2; i <= 2; i++) {
+      for (int j = -2; j <= 2; j++) {
         float d = unpackRGBAToDepth(
           texture2D(uShadowMap, uvz.xy + vec2(float(i), float(j)) * texel));
         lit += step(uvz.z - 0.004, d);
       }
     }
-    lit /= 9.0;
+    lit /= 25.0;
     return 1.0 - (1.0 - lit) * rim * uShadowStrength;
   }
 
@@ -261,10 +279,15 @@ const FRAGMENT_SHADER = /* glsl */ `
     float dist = length(cameraPosition - vWorldPos);
 
     // Reconstruct the normal from raw derivatives so per-pixel detail can be
-    // summed BEFORE normalization (correct gradient composition).
+    // summed BEFORE normalization (correct gradient composition). The detail
+    // fades with distance to keep the finest ripples from aliasing into
+    // specular shimmer — but gently, so the mid-field stays alive.
     float detailFade = exp(-dist * 0.03);
     vec2 dg = detailGradient(vWorldPos.xz, uTime) * detailFade;
-    vec3 N = normalize(vec3(-(vGrad.x + dg.x), 1.0 - vGrad.y, -(vGrad.z + dg.y)));
+    // Standard height-field normal from the summed cascade slopes + fine detail.
+    // vGrad.y is FOAM now (summed cascade folding), not a slope term, so it must
+    // NOT feed the normal — the slope alone tilts the surface.
+    vec3 N = normalize(vec3(-(vGrad.x + dg.x), 1.0, -(vGrad.z + dg.y)));
 
     // ---- Fresnel (Schlick, F0 = 0.02 for water) -------------------------
     float NdotV = max(dot(N, V), 0.0);
@@ -307,8 +330,16 @@ const FRAGMENT_SHADER = /* glsl */ `
                     * vnoise(vWorldPos.xz * 0.23 - uTime * 0.02);
     // Whitecapping: wind lowers the breaking threshold, so with a rising
     // breeze progressively gentler crests carry foam (Beaufort look).
-    float foamLo = mix(0.42, 0.22, uWhitecaps);
-    float foam = smoothstep(foamLo, foamLo + 0.43, vGrad.y + foamNoise * 0.35 - 0.18);
+    // vGrad.y is the summed cascade Jacobian folding — whitecaps form where the
+    // choppy crests pinch (J small). Wind lowers the breaking threshold so more
+    // crests foam as it builds. Noise breaks it into streaks, not a flat wash.
+    float foamLo = mix(0.50, 0.08, uWhitecaps);
+    float foam = smoothstep(foamLo, foamLo + 0.28, vGrad.y * 1.7 + foamNoise * 0.35 - 0.04);
+    // Whitecaps break at the TOPS of waves: gate the folding-foam by height so
+    // it caps the crests instead of mottling the whole surface. Scaled by the
+    // sea-state Hs proxy so it tracks the actual wave size.
+    float crestGate = smoothstep(0.12 * uSeaHeight, 0.5 * uSeaHeight, vHeight);
+    foam *= crestGate;
     // Hull churn + wake join the natural crest foam.
     foam = clamp(foam + boatFoam(vWorldPos.xz, uTime), 0.0, 1.0);
     vec3 foamColor = vec3(0.92) * (0.25 + 0.75 * max(dot(N, uSunDir), 0.0) * bodyShadow)
@@ -321,6 +352,16 @@ const FRAGMENT_SHADER = /* glsl */ `
     // ---- Height fog towards the horizon color ---------------------------
     float fog = 1.0 - exp(-pow(dist * uFogDensity, 1.6));
     color = mix(color, uHorizonColor, clamp(fog, 0.0, 1.0));
+
+    // ---- Grid-edge dissolve --------------------------------------------
+    // The tessellated sea is a finite tile that re-centres on the camera, so
+    // without this its square boundary shows as a hard "coastline" against
+    // the sky. Fade the outer rim of the tile into the horizon color (using
+    // a square/Chebyshev metric so all four edges vanish together): the sea
+    // now reads as blending seamlessly into the haze — an endless ocean.
+    vec2 gc = abs(vWorldPos.xz - uGridCenter) / uGridHalf;
+    float edgeFade = smoothstep(0.70, 0.98, max(gc.x, gc.y));
+    color = mix(color, uHorizonColor, edgeFade);
 
     gl_FragColor = vec4(color, 1.0);
     // Output is linear HDR; tone mapping + sRGB happen in the OutputPass.
@@ -359,6 +400,30 @@ export class Ocean {
     this.waves.push(this._swellSlot);
     this._swellDesired = null; // {bearingDeg, wavelength, amplitude}
 
+    // --- FFT spectral field: the real source of truth ----------------------
+    // Drives BOTH the vertex displacement (uploaded as uDispTex each frame)
+    // and the CPU height/velocity queries the physics uses — so the boat
+    // floats on exactly the water that's drawn. N=128 over a 160 m patch runs
+    // ~3 ms/frame (see test-fft.mjs) and tiles seamlessly.
+    this.fft = new FFTOcean({ windSpeed: 9 }); // 3 band-limited cascades
+    // Live sea-state wind (m/s) driving the spectrum; morphs toward the wind.
+    this._seaWindMs = 9;
+    this._lastRebuildWind = 9;
+    this._lastRebuildDir = 0;
+    const cascades = this.fft.cascades;
+    this._cascadeData = cascades.map((c) => new Uint16Array(c.N * c.N * 4)); // half-float RGBA
+    this.cascadeTextures = cascades.map((c, i) => {
+      const t = new THREE.DataTexture(
+        this._cascadeData[i], c.N, c.N, THREE.RGBAFormat, THREE.HalfFloatType
+      );
+      t.magFilter = THREE.LinearFilter;
+      t.minFilter = THREE.LinearFilter;
+      t.wrapS = THREE.RepeatWrapping;
+      t.wrapT = THREE.RepeatWrapping;
+      t.needsUpdate = true;
+      return t;
+    });
+
     const packed = packWaveUniforms(this.waves);
 
     this.uniforms = {
@@ -368,6 +433,11 @@ export class Ocean {
       uWaveRot: { value: 0 },
       uWaves: { value: packed.waveVectors },
       uPhases: { value: packed.phases },
+      // FFT cascade displacement fields (vertex) — see FFTWaves.js.
+      uCascadeTex: { value: this.cascadeTextures },
+      uCascadePatch: { value: cascades.map((c) => c.patch) },
+      uCascadeTexel: { value: cascades.map((c) => c.patch / c.N) },
+      uSeaHeight: { value: 3.0 }, // rough Hs proxy — places whitecaps on crests
       // Sky-driven values; SkySystem overwrites these via applySkyState().
       uSunDir: { value: new THREE.Vector3(0.3, 0.7, 0.2).normalize() },
       uSunColor: { value: new THREE.Color(1.0, 0.95, 0.85) },
@@ -376,6 +446,9 @@ export class Ocean {
       uDeepColor: { value: new THREE.Color(0.008, 0.042, 0.09) },
       uScatterColor: { value: new THREE.Color(0.02, 0.22, 0.26) },
       uFogDensity: { value: 0.0016 },
+      // Grid-edge dissolve: centre follows the camera-snapped mesh each frame.
+      uGridCenter: { value: new THREE.Vector2(0, 0) },
+      uGridHalf: { value: size * 0.5 },
       // Boat interaction: (x, z, forwardX, forwardZ) + speed. Drives hull
       // contact foam and the wake trail in the fragment shader.
       uBoatPosDir: { value: new THREE.Vector4(0, 0, 1, 0) },
@@ -439,21 +512,49 @@ export class Ocean {
    * callers never have to think about wave sets, scales or clocks.
    */
   getHeightAt(x, z) {
-    return getWaveHeight(
-      this.waves, x, z, this.time, this.heightScale, this.choppiness, this.waveRot
-    );
+    return this.fft.heightAt(x, z);
   }
 
   /**
-   * Water-particle (orbital) velocity at world (x, z) — analytic, exact.
-   * Hull drag is computed relative to this, so waves carry the boat.
+   * Water-particle (orbital) velocity at world (x, z). Hull drag is computed
+   * relative to this, so waves carry the boat.
    * @param {THREE.Vector3} target filled and returned
    */
   getWaterVelocityAt(x, z, target) {
-    const v = sampleWaveVelocity(
-      this.waves, x, z, this.time, this.heightScale, this.choppiness, this.waveRot
-    );
-    return target.set(v.x, v.y, v.z);
+    return this.fft.velocityAt(x, z, target);
+  }
+
+  /**
+   * Water-particle velocity at (x, z) some `depth` metres below the surface.
+   * The FFT field is a surface field, so we apply a representative exponential
+   * depth decay to the orbital velocity (the swell reaches deeper than chop).
+   * @param {THREE.Vector3} target filled and returned
+   */
+  getSubsurfaceVelocityAt(x, z, depth, target) {
+    this.fft.velocityAt(x, z, target);
+    return target.multiplyScalar(Math.exp(-Math.max(depth, 0) * 0.2));
+  }
+
+  /**
+   * Pack each FFT cascade's displacement/foam field into its half-float
+   * texture. RGBA = (dx, dy, dz, foam), metres.
+   */
+  _packDispTexture() {
+    const toHalf = THREE.DataUtils.toHalfFloat;
+    const cs = this.fft.cascades;
+    for (let ci = 0; ci < cs.length; ci++) {
+      const c = cs[ci];
+      const data = this._cascadeData[ci];
+      const n2 = c.N * c.N;
+      for (let i = 0; i < n2; i++) {
+        const o = i * 4;
+        data[o] = toHalf(c.dispX[i]);
+        data[o + 1] = toHalf(c.dispY[i]);
+        data[o + 2] = toHalf(c.dispZ[i]);
+        data[o + 3] = toHalf(c.foam[i]);
+      }
+      this.cascadeTextures[ci].needsUpdate = true;
+    }
   }
 
   /** Per-frame boat state for contact foam + wake (world XZ, unit forward,
@@ -540,8 +641,10 @@ export class Ocean {
   snapSeaToWind(wind) {
     this.waveRot = this._windTargetRot(wind);
     this.uniforms.uWaveRot.value = this.waveRot;
-    this.setHeightScale(seaHeightForWind(wind.speedKnots));
-    this.setChoppiness(seaChopForWind(wind.speedKnots));
+    this._seaWindMs = Math.min(wind.speedKnots * 0.514444, 18);
+    this._lastRebuildWind = this._seaWindMs;
+    this._lastRebuildDir = this.waveRot;
+    this.fft.setWind(this._seaWindMs, this.waveRot);
   }
 
   /**
@@ -567,28 +670,50 @@ export class Ocean {
 
     if (wind && this.seaFollowsWind && dt > 0) {
       const k = 1 - Math.exp(-dt / SEA_BUILD_TAU);
-      this.setHeightScale(
-        THREE.MathUtils.lerp(this.heightScale, seaHeightForWind(wind.speedKnots), k)
-      );
-      this.setChoppiness(
-        THREE.MathUtils.lerp(this.choppiness, seaChopForWind(wind.speedKnots), k)
-      );
+      // Sea state now lives in the SPECTRUM: drive the FFT's wind speed so the
+      // waves grow in length AND height with wind (a real storm sea), not just
+      // scale up the same chop. Capped so hurricane waves stay big but the
+      // physics sane.
+      const targetWind = Math.min(wind.speedKnots * 0.514444, 18);
+      this._seaWindMs = THREE.MathUtils.lerp(this._seaWindMs, targetWind, k);
 
-      // shortest-arc, rate-limited swing towards downwind
+      // shortest-arc, rate-limited swing of the wave heading towards downwind
       const target = this._windTargetRot(wind);
-      let diff = target - this.waveRot;
-      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-      const maxStep = SEA_ROT_RATE * dt;
-      this.waveRot += THREE.MathUtils.clamp(diff, -maxStep, maxStep);
+      const diff = Math.atan2(Math.sin(target - this.waveRot), Math.cos(target - this.waveRot));
+      this.waveRot += THREE.MathUtils.clamp(diff, -SEA_ROT_RATE * dt, SEA_ROT_RATE * dt);
       this.uniforms.uWaveRot.value = this.waveRot;
+
+      // Rebuilding the spectrum costs ~1–2 ms, so only do it once it has
+      // drifted enough (the field morphs smoothly — phases are preserved).
+      if (
+        Math.abs(this._seaWindMs - this._lastRebuildWind) > 0.15 ||
+        Math.abs(this.waveRot - this._lastRebuildDir) > 0.03
+      ) {
+        this.fft.setWind(this._seaWindMs, this.waveRot);
+        this._lastRebuildWind = this._seaWindMs;
+        this._lastRebuildDir = this.waveRot;
+      }
     }
 
     // Event wave must re-compensate for whatever rot/height just changed.
     this._syncSwellSlot();
 
+    // Advance the FFT field and upload it. Wave HEIGHT grows with wind here
+    // (amplitude scale) while the spectral peak stays in the visible band —
+    // so a rising wind makes the on-screen waves visibly build, not shift into
+    // invisible swell. heightScale is a manual "wave height ×" on top. uSeaHeight
+    // is a rough Hs proxy the shader uses to place whitecaps on the crests.
+    const windAmp = THREE.MathUtils.clamp(Math.pow(this._seaWindMs / 6, 0.8), 0.12, 3);
+    this.fft.scale = this.heightScale * windAmp;
+    this.uniforms.uSeaHeight.value = 1.1 * this._seaWindMs * this.heightScale * windAmp;
+    this.fft.update(time, dt > 0 ? dt : 1 / 60);
+    this._packDispTexture();
+
     if (camera) {
       this.mesh.position.x = Math.round(camera.position.x / this.gridStep) * this.gridStep;
       this.mesh.position.z = Math.round(camera.position.z / this.gridStep) * this.gridStep;
+      // Keep the edge-dissolve centred on the tile so its rim always fades.
+      this.uniforms.uGridCenter.value.set(this.mesh.position.x, this.mesh.position.z);
     }
   }
 }

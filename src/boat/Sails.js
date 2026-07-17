@@ -63,6 +63,12 @@ export class Sails {
     this.boomGroup.add(boom);
 
     // ---- cloth -----------------------------------------------------------------
+    // Each sail gets its OWN material clone so it can wet independently when it
+    // drags in the water (dry dacron is bright; soaked cloth goes dark grey).
+    this.mainMat = SAIL_MATERIAL.clone();
+    this.jibMat = SAIL_MATERIAL.clone();
+    this._wetMain = 0;
+    this._wetJib = 0;
     this.main = new ClothSail(boatGroup, {
       rows: 20,
       cols: 13,
@@ -70,7 +76,7 @@ export class Sails {
         HULL.mastX - c * this.mainFoot * (1 - 0.97 * s),
         this.gooseneckY + s * this.mainHeight,
       ],
-      material: SAIL_MATERIAL,
+      material: this.mainMat,
       broadseam: 0.035,
     });
 
@@ -84,7 +90,7 @@ export class Sails {
         this.tack.x + this.jibLuff.x * s - c * this.jibFoot * (1 - 0.97 * s),
         this.tack.y + this.jibLuff.y * s,
       ],
-      material: SAIL_MATERIAL,
+      material: this.jibMat,
       broadseam: 0.035,
     });
     this.jibClewIndex = this.jib.id(0, this.jib.cols - 1);
@@ -102,19 +108,36 @@ export class Sails {
           bx: HULL.mastX, by: this.mastheadY, bz: 0, r: 0.035 }
       );
     }
-    this.main.colliders = shrouds; // main luff lives ON the mast — shrouds only
+    // Fore/back-stays: thin standing rigging the cloth must not pass through
+    // (without these a billowing sail clips straight over a stay). The jib
+    // luff is pinned ON the forestay, and pinned particles skip collision, so
+    // the stay just keeps the belly set to one side — as a real jib flies.
+    const forestay = {
+      ax: HULL.length / 2 - 0.1, ay: HULL.sheer + 0.12, az: 0,
+      bx: HULL.mastX, by: this.mastheadY, bz: 0, r: 0.03,
+    };
+    const backstay = {
+      ax: -HULL.length / 2 + 0.06, ay: HULL.sheer + 0.1, az: 0,
+      bx: HULL.mastX, by: this.mastheadY, bz: 0, r: 0.03,
+    };
+    this.main.colliders = [...shrouds, backstay, forestay];
     this.jib.colliders = [
       ...shrouds,
+      backstay,
+      forestay,
       { ax: HULL.mastX, ay: HULL.sheer, az: 0,
         bx: HULL.mastX, by: this.mastheadY, bz: 0, r: 0.1 }, // the mast
     ];
 
     // ---- running rigging ---------------------------------------------------------
-    this.ropeMainsheet = new SimRope(boatGroup, { radius: 0.01, color: 0x8a2f2f });
-    this.ropeVang = new SimRope(boatGroup, { segments: 6, color: 0x4e5a48 });
+    // Deck-level running rigging gets a floor so slack line rests on the deck
+    // instead of sagging through it (the halyard runs up the mast — no floor).
+    const deckFloor = HULL.sheer + 0.02;
+    this.ropeMainsheet = new SimRope(boatGroup, { radius: 0.01, color: 0x8a2f2f, floorY: deckFloor });
+    this.ropeVang = new SimRope(boatGroup, { segments: 6, color: 0x4e5a48, floorY: deckFloor });
     this.ropeHalyard = new SimRope(boatGroup, { segments: 6, radius: 0.006, color: 0xc9bfa8 });
-    this.ropeJibActive = new SimRope(boatGroup, { color: 0xb59a6a });
-    this.ropeJibLazy = new SimRope(boatGroup, { segments: 10, color: 0xb59a6a });
+    this.ropeJibActive = new SimRope(boatGroup, { color: 0xb59a6a, floorY: deckFloor });
+    this.ropeJibLazy = new SimRope(boatGroup, { segments: 10, color: 0xb59a6a, floorY: deckFloor });
 
     // ---- coupling output (smoothed; flutter noise must not shake physics) --
     this.onClothAero = null; // Boat.js wires this to BoatPhysics.setClothAero
@@ -128,6 +151,34 @@ export class Sails {
     this._b = new THREE.Vector3();
     this._c = new THREE.Vector3();
     this._f = new THREE.Vector3();
+  }
+
+  /**
+   * Report how much of each sail is under water (instantaneous submerged
+   * fraction, 0..1). Two effects, both eased for naturalness:
+   *   - visual wetness darkens the cloth (soaks fast, dries slowly),
+   *   - windScale cuts the aero drive so a sail in the water goes limp and
+   *     drifts with the boat/current instead of holding a wind-filled shape.
+   * @param {number} mainSub  submerged fraction of the main
+   * @param {number} jibSub   submerged fraction of the jib
+   * @param {number} dt       frame delta (easing)
+   */
+  setWetness(mainSub, jibSub, dt) {
+    const soak = (cur, sub) => {
+      const rate = sub > cur ? 9 : 0.5; // wet quickly, dry slowly
+      return cur + (sub - cur) * (1 - Math.exp(-dt * rate));
+    };
+    this._wetMain = soak(this._wetMain, mainSub);
+    this._wetJib = soak(this._wetJib, jibSub);
+    // Visual only: the wind/water hand-off is done per-particle in ClothSail
+    // (subWeight), so a partly dipped sail is handled correctly.
+    const apply = (mat, wet) => {
+      const g = 1 - 0.6 * wet; // darken toward soaked grey
+      mat.color.setRGB(g, g, Math.min(1, g * 1.04));
+      mat.roughness = 0.78 - 0.2 * wet; // soaked cloth is a touch glossier
+    };
+    apply(this.mainMat, this._wetMain);
+    apply(this.jibMat, this._wetJib);
   }
 
   /** Re-lay both cloths flat and zero coupling output (boat reset). */

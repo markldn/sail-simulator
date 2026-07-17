@@ -121,6 +121,11 @@ function buildHullGeometry() {
   for (let j = 0; j < SECTIONS - 1; j++) {
     indices.push(centroidIndex, vid(0, j), vid(0, j + 1));
   }
+  // Close the mouth of the ∪-section: the fan wraps port sheer → bottom →
+  // starboard sheer, but the straight run back across the top deck edge is
+  // left open (a see-through V-notch in the transom). This final triangle
+  // caps it, so the stern reads as solid planking instead of a hole.
+  indices.push(centroidIndex, vid(0, SECTIONS - 1), vid(0, 0));
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -135,12 +140,19 @@ function buildDeckGeometry() {
   const positions = [];
   const uvs = [];
   const indices = [];
+  // UV in WORLD units, not normalized fraction: a normalized "u across the
+  // beam" maps a straight plank seam onto the tapering deck, so the seam kinks
+  // at every station (a zigzag). Keying u to world-z instead makes each seam a
+  // constant-z line — straight, parallel planks laid fore-and-aft as on a real
+  // teak deck. (~56 mm planks; v scaled so the grain runs the right way.)
+  const uScale = 1.4; // texture repeats per metre across the beam
+  const vScale = 0.4; // grain repeats per metre along the length
   for (let i = 0; i < STATIONS; i++) {
     const t = i / (STATIONS - 1);
     const x = stationX(t);
     const hb = halfBreadth(t);
     positions.push(x, HULL.sheer, -hb, x, HULL.sheer, hb);
-    uvs.push(0, t * 4, 1, t * 4); // planks run along the length
+    uvs.push(-hb * uScale, x * vScale, hb * uScale, x * vScale);
   }
   for (let i = 0; i < STATIONS - 1; i++) {
     const p0 = i * 2;

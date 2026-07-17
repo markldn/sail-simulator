@@ -25,6 +25,7 @@ export class Boat {
     scene.add(this.model);
 
     this.helmState = helmState;
+    this.ocean = ocean; // for wet-sail submersion queries
     this.physics = new BoatPhysics(physicsWorld, ocean, wind, helmState);
     this.sails = new Sails(this.model);
     // Two-way coupling: cloth pressure/CP feeds back into hull forces.
@@ -49,6 +50,8 @@ export class Boat {
 
     this._m4 = new THREE.Matrix4();
     this._v3 = new THREE.Vector3();
+    this._vWater = new THREE.Vector3(); // scratch: sail water-current velocity
+    this._qInv = new THREE.Quaternion(); // scratch: inverse hull orientation
     this._colSub = new THREE.Color(0x33ff66);
     this._colDry = new THREE.Color(0x556066);
   }
@@ -64,6 +67,13 @@ export class Boat {
     this.model.position.copy(s.position);
     this.model.quaternion.copy(s.quaternion);
 
+    // Wet sails: find which cloth particles are under the wave surface and,
+    // for those, the local water-current velocity (boat frame) that will
+    // advect them. Feeds cloth hydrodynamics + material darkening. (Uses last
+    // frame's cloth positions with this frame's hull pose — invisible lag.)
+    const mainSub = this._updateSailWater(this.sails.main, s);
+    const jibSub = this._updateSailWater(this.sails.jib, s);
+    this.sails.setWetness(mainSub, jibSub, dt);
     this.sails.update(this.physics.lastAero, time, dt, this.physics.sailPlan);
     // +rudderDeg = bow to starboard: blade trailing edge swings starboard,
     // tiller sweeps to port — matching real tiller geometry.
@@ -83,6 +93,75 @@ export class Boat {
       this.sampleMarkers.instanceColor.needsUpdate = true;
     }
     return s; // heading/heel/sog etc. for the HUD and chase camera
+  }
+
+  /**
+   * Build a sail's hydrodynamic water field for this frame and return its
+   * submerged fraction. For each cloth particle it computes the world depth
+   * below the wave surface; submerged particles get a subWeight (0..1) and the
+   * local water-current velocity in BOAT frame (so ClothSail can drag them
+   * along with the flow). A cheap min-height reject skips all the ocean
+   * sampling in the common case where the sail is well clear of the water.
+   * @param {import('./ClothSail.js').ClothSail} cloth
+   * @param {{position:THREE.Vector3, quaternion:THREE.Quaternion}} s hull pose
+   * @returns {number} submerged fraction, 0 … 1
+   */
+  _updateSailWater(cloth, s) {
+    const sw = cloth.subWeight;
+    if (!cloth.mesh.visible) {
+      cloth.submerged = false;
+      sw.fill(0);
+      return 0;
+    }
+    const pos = cloth.pos;
+    const q = s.quaternion;
+    const px = s.position.x;
+    const py = s.position.y;
+    const pz = s.position.z;
+
+    // Cheap reject: lowest cloth point vs the surface near the boat. Sails ride
+    // metres up, so this early-outs every normal frame with one height query.
+    let minY = Infinity;
+    for (let p = 0; p < cloth.n; p++) {
+      const k = p * 3;
+      this._v3.set(pos[k], pos[k + 1], pos[k + 2]).applyQuaternion(q);
+      const wy = this._v3.y + py;
+      if (wy < minY) minY = wy;
+    }
+    if (minY > this.ocean.getHeightAt(px, pz) + 1.5) {
+      cloth.submerged = false;
+      sw.fill(0);
+      return 0;
+    }
+
+    // Full pass: per-particle depth, submersion weight, and boat-frame current.
+    this._qInv.copy(q).conjugate();
+    const wv = cloth.waterVel;
+    let below = 0;
+    let anySub = false;
+    for (let p = 0; p < cloth.n; p++) {
+      const k = p * 3;
+      this._v3.set(pos[k], pos[k + 1], pos[k + 2]).applyQuaternion(q);
+      const wx = this._v3.x + px;
+      const wy = this._v3.y + py;
+      const wz = this._v3.z + pz;
+      const depth = this.ocean.getHeightAt(wx, wz) - wy;
+      if (depth > 0) {
+        anySub = true;
+        below++;
+        sw[p] = depth > 0.3 ? 1 : depth / 0.3; // ramp in over the top 0.3 m
+        this.ocean.getSubsurfaceVelocityAt(wx, wz, depth, this._vWater);
+        this._vWater.applyQuaternion(this._qInv); // world → boat frame
+        wv[k] = this._vWater.x;
+        wv[k + 1] = this._vWater.y;
+        wv[k + 2] = this._vWater.z;
+      } else {
+        sw[p] = 0;
+        wv[k] = wv[k + 1] = wv[k + 2] = 0;
+      }
+    }
+    cloth.submerged = anySub;
+    return below / cloth.n;
   }
 
   reset() {
