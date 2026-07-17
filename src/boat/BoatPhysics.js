@@ -139,6 +139,7 @@ export class BoatPhysics {
       jibBetaDeg: 0,
       mainAlphaDeg: 0,
       luffing: false,
+      awBody: new THREE.Vector3(), // apparent wind, BODY frame, m/s (cloth sim)
     };
 
     // ---- rigid body ------------------------------------------------------
@@ -352,6 +353,7 @@ export class BoatPhysics {
 
     // …then the sails, in the body frame.
     this._aw.applyQuaternion(this._invQ);
+    aero.awBody.copy(this._aw); // cloth sim blows with exactly this wind
     const aws = Math.hypot(this._aw.x, this._aw.z);
     aero.awsKn = aws * MS_TO_KNOTS;
     if (aws < 0.2) {

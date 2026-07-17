@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node scripts/test-buoyancy.mjs && node scripts/test-sailing.mjs"
+    "test": "node scripts/test-buoyancy.mjs && node scripts/test-sailing.mjs && node scripts/test-cloth.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",
