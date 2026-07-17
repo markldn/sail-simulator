@@ -86,6 +86,9 @@ async function init() {
   ocean.applySkyState(sky.getOceanState());
 
   const wind = new WindManager({ speedKnots: 12, directionDeg: 315 });
+  // Start with the sea already fully developed for this wind (no 30 s of
+  // watching it build from calm at load).
+  ocean.snapSeaToWind(wind);
 
   // Helm before boat: physics keeps a live reference to helm.state.
   const helm = new Helm();
@@ -167,8 +170,9 @@ async function init() {
     // Advance the ocean clock FIRST: the buoyancy hooks inside physics.step
     // query ocean.getHeightAt(), which must see the same time the water is
     // rendered with this frame. (Substeps within a frame share this time —
-    // a ≤16 ms approximation, well below anything visible.)
-    ocean.update(elapsed, camera);
+    // a ≤16 ms approximation, well below anything visible.) The wind ref
+    // lets the sea state follow the wind sliders.
+    ocean.update(elapsed, camera, frameDt, wind);
 
     helm.update(frameDt); // move rudder/sheet from held keys
     physics.step(frameDt);

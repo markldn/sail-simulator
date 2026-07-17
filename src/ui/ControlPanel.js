@@ -33,19 +33,28 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
     .onChange((v) => wind.setDirectionDeg(v));
 
   // --- Sea state --------------------------------------------------------------
-  // Ranges chosen so choppiness × total steepness stays below the Gerstner
-  // self-intersection limit at max height; push both sliders to the top and
-  // crests will just begin to show curl-over artifacts — that's the physical
-  // limit of the wave model, not a bug.
+  // With "Sea follows wind" on (default) the sliders are read-only displays
+  // of the wind-driven sea; turn it off for manual control. Ranges chosen so
+  // choppiness × total steepness stays below the Gerstner self-intersection
+  // limit; maxed-out crests will just begin to curl over — that's the
+  // physical limit of the wave model, not a bug.
   const seaFolder = gui.addFolder('Sea state');
-  seaFolder
-    .add(ocean, 'heightScale', 0, 2, 0.01)
+  const heightCtrl = seaFolder
+    .add(ocean, 'heightScale', 0, 2.4, 0.01)
     .name('Wave height ×')
+    .listen()
     .onChange((v) => ocean.setHeightScale(v));
-  seaFolder
+  const chopCtrl = seaFolder
     .add(ocean, 'choppiness', 0, 1.2, 0.01)
     .name('Choppiness')
+    .listen()
     .onChange((v) => ocean.setChoppiness(v));
+  const syncSeaMode = (auto) => {
+    heightCtrl.enable(!auto);
+    chopCtrl.enable(!auto);
+  };
+  seaFolder.add(ocean, 'seaFollowsWind').name('Sea follows wind').onChange(syncSeaMode);
+  syncSeaMode(ocean.seaFollowsWind);
 
   // --- Sky / sun ----------------------------------------------------------------
   const applySun = () => {

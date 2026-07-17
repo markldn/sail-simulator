@@ -30,7 +30,21 @@ import {
   createWaveSet,
   packWaveUniforms,
   getWaveHeight,
+  sampleWaveVelocity,
 } from './GerstnerWaves.js';
+
+// How the sea answers the wind (used when seaFollowsWind is on):
+// height scale from wind speed — glassy under 1 kn, ~1.0 at 12 kn,
+// capped at 2.4 (the Gerstner self-intersection ceiling).
+function seaHeightForWind(kn) {
+  if (kn < 0.5) return 0.03;
+  return Math.min(0.05 + Math.pow(kn / 12, 1.35), 2.4);
+}
+function seaChopForWind(kn) {
+  return THREE.MathUtils.clamp(0.45 + kn * 0.02, 0.5, 1.05);
+}
+const SEA_BUILD_TAU = 5; // s — e-folding time for height/chop to respond
+const SEA_ROT_RATE = THREE.MathUtils.degToRad(6); // rad/s max direction swing
 
 // ---------------------------------------------------------------------------
 // Vertex shader — Gerstner displacement + analytic surface derivatives
@@ -41,8 +55,9 @@ const VERTEX_SHADER = /* glsl */ `
   #define GRAVITY ${GRAVITY.toFixed(4)}
 
   uniform float uTime;
-  uniform float uHeightScale;   // global amplitude multiplier (GUI)
-  uniform float uChoppiness;    // Gerstner Q factor (GUI)
+  uniform float uHeightScale;   // global amplitude multiplier
+  uniform float uChoppiness;    // Gerstner Q factor
+  uniform float uWaveRot;       // wave-field rotation (sea follows wind)
   uniform vec4  uWaves[NUM_WAVES];   // (dirX, dirZ, wavelength, amplitude)
   uniform float uPhases[NUM_WAVES];
 
@@ -61,8 +76,14 @@ const VERTEX_SHADER = /* glsl */ `
     vec2  slope = vec2(0.0); // Σ D * k * A * cos(f)  → dY/dx, dY/dz
     float jac   = 0.0;       // Σ Q * k * A * sin(f)  → crest pinch (foam!)
 
+    // Wave-field rotation — must match sampleWaveDisplacement() in
+    // GerstnerWaves.js exactly.
+    float cR = cos(uWaveRot);
+    float sR = sin(uWaveRot);
+
     for (int i = 0; i < NUM_WAVES; i++) {
-      vec2  dir = uWaves[i].xy;
+      vec2  d0  = uWaves[i].xy;
+      vec2  dir = vec2(d0.x * cR - d0.y * sR, d0.x * sR + d0.y * cR);
       float k   = TWO_PI / uWaves[i].z;
       float a   = uWaves[i].w * uHeightScale;
       float w   = sqrt(GRAVITY * k);            // deep-water dispersion
@@ -95,6 +116,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   #define GRAVITY ${GRAVITY.toFixed(4)}
 
   uniform float uTime;
+  uniform float uWaveRot;       // detail ripples swing with the sea too
   uniform vec3  uSunDir;        // TOWARDS the sun, normalized
   uniform vec3  uSunColor;      // linear
   uniform vec3  uZenithColor;   // analytic sky gradient (matches SkySystem)
@@ -125,13 +147,16 @@ const FRAGMENT_SHADER = /* glsl */ `
   // surface up close. Faded with distance to avoid specular shimmer/aliasing.
   vec2 detailGradient(vec2 p, float t) {
     vec2 grad = vec2(0.0);
+    float cR = cos(uWaveRot);
+    float sR = sin(uWaveRot);
     // (dir.x, dir.y, wavelength, amplitude) — deterministic, tiny
     vec4 defs[3];
     defs[0] = vec4( 0.95,  0.31, 0.90, 0.014);
     defs[1] = vec4(-0.40,  0.92, 0.51, 0.008);
     defs[2] = vec4( 0.60, -0.80, 0.31, 0.004);
     for (int i = 0; i < 3; i++) {
-      vec2  d = defs[i].xy;
+      vec2  d0 = defs[i].xy;
+      vec2  d  = vec2(d0.x * cR - d0.y * sR, d0.x * sR + d0.y * cR);
       float k = TWO_PI / defs[i].z;
       float a = defs[i].w;
       float w = sqrt(GRAVITY * k);
@@ -218,9 +243,13 @@ export class Ocean {
     this.segments = segments;
     this.gridStep = size / segments;
 
-    // Live sea-state parameters (GUI writes these via setters below).
+    // Live sea-state parameters. With seaFollowsWind on (default) they are
+    // driven from the wind each frame; turn it off in the GUI for manual
+    // slider control.
     this.heightScale = 1.0;
     this.choppiness = 0.8;
+    this.waveRot = 0; // radians; wave travel dir = spectrum dirs rotated by this
+    this.seaFollowsWind = true;
 
     // The wave set shared with physics. Ocean owns it; physics asks Ocean.
     this.waves = createWaveSet();
@@ -230,6 +259,7 @@ export class Ocean {
       uTime: { value: 0 },
       uHeightScale: { value: this.heightScale },
       uChoppiness: { value: this.choppiness },
+      uWaveRot: { value: 0 },
       uWaves: { value: packed.waveVectors },
       uPhases: { value: packed.phases },
       // Sky-driven values; SkySystem overwrites these via applySkyState().
@@ -288,16 +318,70 @@ export class Ocean {
    * callers never have to think about wave sets, scales or clocks.
    */
   getHeightAt(x, z) {
-    return getWaveHeight(this.waves, x, z, this.time, this.heightScale, this.choppiness);
+    return getWaveHeight(
+      this.waves, x, z, this.time, this.heightScale, this.choppiness, this.waveRot
+    );
   }
 
   /**
-   * Per-frame update: advance time and slide the grid under the camera in
-   * whole-grid-cell steps. Snapping to gridStep keeps vertices at identical
-   * world positions frame-to-frame, so the follow is imperceptible.
+   * Water-particle (orbital) velocity at world (x, z) — analytic, exact.
+   * Hull drag is computed relative to this, so waves carry the boat.
+   * @param {THREE.Vector3} target filled and returned
    */
-  update(time, camera) {
+  getWaterVelocityAt(x, z, target) {
+    const v = sampleWaveVelocity(
+      this.waves, x, z, this.time, this.heightScale, this.choppiness, this.waveRot
+    );
+    return target.set(v.x, v.y, v.z);
+  }
+
+  /** Target wave-field rotation so the spectrum travels dead downwind. */
+  _windTargetRot(wind) {
+    const b = THREE.MathUtils.degToRad(wind.directionDeg + 180); // travel bearing
+    // Primary spectrum dir is +X; world vector of bearing b is (sin b, −cos b).
+    return Math.atan2(-Math.cos(b), Math.sin(b));
+  }
+
+  /** Jump the sea state straight to the wind (no build-up) — used at load. */
+  snapSeaToWind(wind) {
+    this.waveRot = this._windTargetRot(wind);
+    this.uniforms.uWaveRot.value = this.waveRot;
+    this.setHeightScale(seaHeightForWind(wind.speedKnots));
+    this.setChoppiness(seaChopForWind(wind.speedKnots));
+  }
+
+  /**
+   * Per-frame update: advance time, follow the wind, slide the grid under
+   * the camera in whole-grid-cell steps (world-anchored waves make the
+   * follow imperceptible).
+   *
+   * Sea-follows-wind is deliberately SLOW: height builds/decays with a 5 s
+   * time constant and the direction swings at ≤6°/s, so moving the wind
+   * sliders reads as the sea reacting, not the world snapping. (Rotating a
+   * phase field shifts wave positions; rate-limiting is what keeps that
+   * shift looking like a natural migration.)
+   */
+  update(time, camera, dt = 0, wind = null) {
     this.uniforms.uTime.value = time;
+
+    if (wind && this.seaFollowsWind && dt > 0) {
+      const k = 1 - Math.exp(-dt / SEA_BUILD_TAU);
+      this.setHeightScale(
+        THREE.MathUtils.lerp(this.heightScale, seaHeightForWind(wind.speedKnots), k)
+      );
+      this.setChoppiness(
+        THREE.MathUtils.lerp(this.choppiness, seaChopForWind(wind.speedKnots), k)
+      );
+
+      // shortest-arc, rate-limited swing towards downwind
+      const target = this._windTargetRot(wind);
+      let diff = target - this.waveRot;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      const maxStep = SEA_ROT_RATE * dt;
+      this.waveRot += THREE.MathUtils.clamp(diff, -maxStep, maxStep);
+      this.uniforms.uWaveRot.value = this.waveRot;
+    }
+
     if (camera) {
       this.mesh.position.x = Math.round(camera.position.x / this.gridStep) * this.gridStep;
       this.mesh.position.z = Math.round(camera.position.z / this.gridStep) * this.gridStep;

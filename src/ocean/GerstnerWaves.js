@@ -94,35 +94,76 @@ export function packWaveUniforms(waves) {
   };
 }
 
-// Scratch object reused by sampleWaveDisplacement to avoid per-call GC churn
-// (this function will run hundreds of times per frame in Phase 2 buoyancy).
+// Scratch objects reused to avoid per-call GC churn (these functions run
+// hundreds of times per frame in the buoyancy loop).
 const _disp = { dx: 0, dy: 0, dz: 0 };
+const _vel = { x: 0, y: 0, z: 0 };
 
 /**
  * Evaluate the summed Gerstner displacement that the vertex shader would
  * apply to grid point (x, z) at time t. MUST mirror the GLSL loop in
  * Ocean.js exactly (same signs, same phase convention).
  *
+ * @param {number} rot global wave-field rotation in radians — the whole
+ *        spectrum swings with the wind (Ocean drives this). Applied to
+ *        every wave's travel direction, identically on CPU and GPU.
  * @returns {{dx:number, dy:number, dz:number}} shared scratch object — copy
  *          the values out if you need to keep them across calls.
  */
-export function sampleWaveDisplacement(waves, x, z, time, heightScale, choppiness) {
+export function sampleWaveDisplacement(waves, x, z, time, heightScale, choppiness, rot = 0) {
+  const cR = Math.cos(rot);
+  const sR = Math.sin(rot);
   let dx = 0;
   let dy = 0;
   let dz = 0;
   for (let i = 0; i < waves.length; i++) {
     const w = waves[i];
+    const dX = w.dirX * cR - w.dirZ * sR;
+    const dZ = w.dirX * sR + w.dirZ * cR;
     const a = w.amplitude * heightScale;
-    const f = w.k * (w.dirX * x + w.dirZ * z) - w.omega * time + w.phase;
+    const f = w.k * (dX * x + dZ * z) - w.omega * time + w.phase;
     const c = Math.cos(f) * a;
-    dx += w.dirX * choppiness * c;
-    dz += w.dirZ * choppiness * c;
+    dx += dX * choppiness * c;
+    dz += dZ * choppiness * c;
     dy += a * Math.sin(f);
   }
   _disp.dx = dx;
   _disp.dy = dy;
   _disp.dz = dz;
   return _disp;
+}
+
+/**
+ * EXACT water-particle velocity at (x, z): the analytic time derivative of
+ * sampleWaveDisplacement (d/dt of a·sin(f) and chop·a·cos(f), with
+ * df/dt = −ω). This is the orbital motion of the water itself — hull drag
+ * is computed RELATIVE to it, which is how waves carry, surge and drift
+ * the boat. Analytic beats finite differencing: no timestep noise, no
+ * previous-sample bookkeeping.
+ *
+ * @returns {{x:number, y:number, z:number}} shared scratch object.
+ */
+export function sampleWaveVelocity(waves, x, z, time, heightScale, choppiness, rot = 0) {
+  const cR = Math.cos(rot);
+  const sR = Math.sin(rot);
+  let vx = 0;
+  let vy = 0;
+  let vz = 0;
+  for (let i = 0; i < waves.length; i++) {
+    const w = waves[i];
+    const dX = w.dirX * cR - w.dirZ * sR;
+    const dZ = w.dirX * sR + w.dirZ * cR;
+    const a = w.amplitude * heightScale;
+    const f = w.k * (dX * x + dZ * z) - w.omega * time + w.phase;
+    const s = Math.sin(f) * a * w.omega;
+    vx += dX * choppiness * s;
+    vz += dZ * choppiness * s;
+    vy += -a * w.omega * Math.cos(f);
+  }
+  _vel.x = vx;
+  _vel.y = vy;
+  _vel.z = vz;
+  return _vel;
 }
 
 /**
@@ -145,15 +186,15 @@ export function sampleWaveDisplacement(waves, x, z, time, heightScale, choppines
  * @param {number} choppiness  global Gerstner Q factor (GUI)
  * @returns {number} water surface Y at (x, z)
  */
-export function getWaveHeight(waves, x, z, time, heightScale, choppiness) {
+export function getWaveHeight(waves, x, z, time, heightScale, choppiness, rot = 0) {
   let px = x;
   let pz = z;
   for (let i = 0; i < 3; i++) {
-    const d = sampleWaveDisplacement(waves, px, pz, time, heightScale, choppiness);
+    const d = sampleWaveDisplacement(waves, px, pz, time, heightScale, choppiness, rot);
     px = x - d.dx;
     pz = z - d.dz;
   }
-  return sampleWaveDisplacement(waves, px, pz, time, heightScale, choppiness).dy;
+  return sampleWaveDisplacement(waves, px, pz, time, heightScale, choppiness, rot).dy;
 }
 
 /**
@@ -162,11 +203,11 @@ export function getWaveHeight(waves, x, z, time, heightScale, choppiness) {
  * physics (wave-impact torque in Phase 2), where a handful of samples per
  * frame is fine.
  */
-export function getWaveNormal(waves, x, z, time, heightScale, choppiness, eps = 0.15) {
-  const hL = getWaveHeight(waves, x - eps, z, time, heightScale, choppiness);
-  const hR = getWaveHeight(waves, x + eps, z, time, heightScale, choppiness);
-  const hD = getWaveHeight(waves, x, z - eps, time, heightScale, choppiness);
-  const hU = getWaveHeight(waves, x, z + eps, time, heightScale, choppiness);
+export function getWaveNormal(waves, x, z, time, heightScale, choppiness, rot = 0, eps = 0.15) {
+  const hL = getWaveHeight(waves, x - eps, z, time, heightScale, choppiness, rot);
+  const hR = getWaveHeight(waves, x + eps, z, time, heightScale, choppiness, rot);
+  const hD = getWaveHeight(waves, x, z - eps, time, heightScale, choppiness, rot);
+  const hU = getWaveHeight(waves, x, z + eps, time, heightScale, choppiness, rot);
   const n = new THREE.Vector3(hL - hR, 2 * eps, hD - hU);
   return n.normalize();
 }

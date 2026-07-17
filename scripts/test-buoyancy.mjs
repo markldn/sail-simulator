@@ -16,7 +16,11 @@
 
 import { PhysicsWorld, FIXED_DT } from '../src/physics/PhysicsWorld.js';
 import { BoatPhysics } from '../src/boat/BoatPhysics.js';
-import { createWaveSet, getWaveHeight } from '../src/ocean/GerstnerWaves.js';
+import {
+  createWaveSet,
+  getWaveHeight,
+  sampleWaveVelocity,
+} from '../src/ocean/GerstnerWaves.js';
 
 let failures = 0;
 function check(label, cond, detail) {
@@ -24,7 +28,7 @@ function check(label, cond, detail) {
   if (!cond) failures++;
 }
 
-/** Minimal stand-in for Ocean: just getHeightAt + a settable clock. */
+/** Minimal stand-in for Ocean: height + orbital velocity + settable clock. */
 function makeOcean(heightScale, choppiness) {
   const waves = createWaveSet();
   return {
@@ -32,6 +36,11 @@ function makeOcean(heightScale, choppiness) {
     getHeightAt(x, z) {
       if (heightScale === 0) return 0;
       return getWaveHeight(waves, x, z, this.t, heightScale, choppiness);
+    },
+    getWaterVelocityAt(x, z, out) {
+      if (heightScale === 0) return out.set(0, 0, 0);
+      const v = sampleWaveVelocity(waves, x, z, this.t, heightScale, choppiness);
+      return out.set(v.x, v.y, v.z);
     },
   };
 }
@@ -93,7 +102,9 @@ async function runScenario(name, heightScale, choppiness, seconds) {
     `    y∈[${r.minY.toFixed(2)}, ${r.maxY.toFixed(2)}] m  maxHeel=${r.maxAbsHeel.toFixed(1)}°` +
       `  maxPitch=${r.maxAbsPitch.toFixed(1)}°`
   );
-  check('stays afloat (y > -1.5 m)', r.minY > -1.5, `minY=${r.minY.toFixed(2)}`);
+  // Wave troughs at this sea state reach ≈ −1.6 m; a boat correctly riding
+  // the surface will follow them down. "Sinking" would be well past −2.
+  check('stays afloat (y > -2.0 m)', r.minY > -2.0, `minY=${r.minY.toFixed(2)}`);
   check('not airborne (y < 3 m)', r.maxY < 3, `maxY=${r.maxY.toFixed(2)}`);
   check('no capsize (max |heel| < 35°)', r.maxAbsHeel < 35, `${r.maxAbsHeel.toFixed(1)}°`);
   check('no pitchpole (max |pitch| < 25°)', r.maxAbsPitch < 25, `${r.maxAbsPitch.toFixed(1)}°`);

@@ -42,22 +42,26 @@ async function sail({ name, headingDeg, autoTrim, sheetMaxDeg, seconds }) {
   const steps = Math.round(seconds / FIXED_DT);
   const state = {};
   let sumSog = 0;
+  let sumFwd = 0;
   let sumHeel = 0;
   let sumHdgErr = 0;
   let n = 0;
 
   for (let i = 0; i < steps; i++) {
     // Proportional autopilot: + rudder turns the bow to starboard, which
-    // increases the compass heading — so gain is positive.
+    // increases the compass heading — so gain is positive. Gain is fairly
+    // stiff because windage + sail trim apply a constant yaw disturbance,
+    // and a pure-P controller carries a steady-state offset against it.
     bp.getState(state);
     const err = wrap180(headingDeg - state.heading);
-    helm.rudderDeg = Math.max(-25, Math.min(25, err * 1.2));
+    helm.rudderDeg = Math.max(-28, Math.min(28, err * 2.2));
 
     pw.step(FIXED_DT * 1.000001);
 
     if (i > steps * 0.7) {
       // judge steady state only
       sumSog += state.sog;
+      sumFwd += state.fwdKn;
       sumHeel += state.heel;
       sumHdgErr += Math.abs(err);
       n++;
@@ -66,7 +70,7 @@ async function sail({ name, headingDeg, autoTrim, sheetMaxDeg, seconds }) {
 
   const res = {
     sogKn: sumSog / n,
-    sogMs: (sumSog / n) * 0.514444,
+    fwdKn: sumFwd / n,
     heel: sumHeel / n,
     hdgErr: sumHdgErr / n,
     aero: bp.lastAero,
@@ -95,7 +99,9 @@ check('heels to leeward (heel > +0.5°)', reach.heel > 0.5, `${reach.heel.toFixe
 check('reasonable heel (< 25°)', reach.heel < 25, `${reach.heel.toFixed(1)}°`);
 check('wind on port side (AWA < 0)', reach.aero.awaDeg < 0, `${reach.aero.awaDeg.toFixed(0)}°`);
 
-// 2 — the no-go zone
+// 2 — the no-go zone. Judged on FORWARD speed: with hull windage the boat
+// rightly drifts (backwards/sideways), which inflates raw SOG — drifting is
+// not "beating upwind".
 const nogo = await sail({
   name: 'Dead upwind N, sheeted hard (60 s) — the no-go zone',
   headingDeg: 0,
@@ -103,7 +109,11 @@ const nogo = await sail({
   sheetMaxDeg: 10,
   seconds: 60,
 });
-check('cannot beat straight upwind (SOG < 1 kn)', nogo.sogKn < 1, `${nogo.sogKn.toFixed(2)} kn`);
+check(
+  'no forward progress upwind (fwd < 1 kn)',
+  nogo.fwdKn < 1,
+  `${nogo.fwdKn.toFixed(2)} kn fwd (SOG ${nogo.sogKn.toFixed(2)} incl. drift)`
+);
 
 // 3 — oversheeted on a beam reach: stalled
 const stalled = await sail({
@@ -113,10 +123,12 @@ const stalled = await sail({
   sheetMaxDeg: 8,
   seconds: 120,
 });
+// Compare FORWARD speed (actual drive) — raw SOG also counts the extra
+// leeway drift a stalled, heeled boat makes, which is real but isn't drive.
 check(
-  'stall kills drive (SOG < 60% of trimmed)',
-  stalled.sogKn < reach.sogKn * 0.6,
-  `${stalled.sogKn.toFixed(2)} vs ${reach.sogKn.toFixed(2)} kn`
+  'stall kills drive (fwd < 60% of trimmed)',
+  stalled.fwdKn < reach.fwdKn * 0.6,
+  `${stalled.fwdKn.toFixed(2)} vs ${reach.fwdKn.toFixed(2)} kn fwd`
 );
 check('but still heels (|heel| > 0.5°)', Math.abs(stalled.heel) > 0.5, `${stalled.heel.toFixed(1)}°`);
 check('deep stall α > 45°', stalled.aero.mainAlphaDeg > 45, `${stalled.aero.mainAlphaDeg.toFixed(0)}°`);
