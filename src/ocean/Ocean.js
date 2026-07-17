@@ -55,6 +55,12 @@ const SEA_ROT_RATE = THREE.MathUtils.degToRad(6); // rad/s max direction swing
 // wave" (tsunami / rogue-wave presets). Amplitude 0 keeps it inert.
 const WAVE_SLOTS = NUM_WAVES + 1;
 
+// Persistent wake: a ring buffer of the boat's recent world positions, fed to
+// the shader so the foam trail stays put in world space and curves with the
+// boat's actual track (rather than swinging with a boat-relative wedge).
+const WAKE_MAX = 48;
+const WAKE_LIFE = 7.0; // seconds a wake segment lingers before it fades out
+
 /** 1×1 white RGBA texture: unpacks to depth 1.0 → "nothing in shadow". */
 function makeWhiteTexture() {
   const tex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
@@ -133,10 +139,13 @@ const FRAGMENT_SHADER = /* glsl */ `
   // three's packing chunk: unpackRGBAToDepth for reading the shadow map
   #include <packing>
 
+  #define WAKE_MAX ${WAKE_MAX}
   uniform float uTime;
   uniform float uWaveRot;       // detail ripples swing with the sea too
   uniform vec4  uBoatPosDir;    // boat x, z, forwardX, forwardZ
   uniform float uBoatSpeed;     // m/s
+  uniform vec4  uWake[WAKE_MAX]; // (worldX, worldZ, ageNorm, strength)
+  uniform int   uWakeCount;
   uniform sampler2D uShadowMap; // sun shadow map (boat shadow on water)
   uniform mat4  uShadowMatrix;
   uniform float uShadowStrength; // 0 = shadow sampling off
@@ -199,6 +208,29 @@ const FRAGMENT_SHADER = /* glsl */ `
       grad += d * (k * a * cos(f));
     }
     return grad;
+  }
+
+  // --- persistent wake trail ------------------------------------------------
+  // Foam along the world-space polyline of the boat's recent track (uWake).
+  // Because the points are absolute world positions, the trail stays put and
+  // curves through the boat's turns, and spreads + fades as each segment ages.
+  float wakeFoam(vec2 p) {
+    float f = 0.0;
+    for (int i = 0; i < WAKE_MAX - 1; i++) {
+      if (i + 1 >= uWakeCount) break;
+      vec4 A = uWake[i];
+      vec4 B = uWake[i + 1];
+      vec2 ba = B.xy - A.xy;
+      vec2 pa = p - A.xy;
+      float bb = max(dot(ba, ba), 1e-4);
+      float h = clamp(dot(pa, ba) / bb, 0.0, 1.0);
+      float d = length(pa - ba * h);
+      float age = mix(A.z, B.z, h);
+      float str = mix(A.w, B.w, h);
+      float width = 1.0 + 3.2 * age;          // spreads with age
+      f += str * exp(-(d * d) / (width * width));
+    }
+    return clamp(f * 1.4, 0.0, 1.0);
   }
 
   // --- boat interaction foam ------------------------------------------------
@@ -354,8 +386,8 @@ const FRAGMENT_SHADER = /* glsl */ `
     // sea-state Hs proxy so it tracks the actual wave size.
     float crestGate = smoothstep(0.12 * uSeaHeight, 0.5 * uSeaHeight, vHeight);
     foam *= crestGate;
-    // Hull churn + wake join the natural crest foam.
-    foam = clamp(foam + boatFoam(vWorldPos.xz, uTime), 0.0, 1.0);
+    // Hull churn, the persistent curved wake trail, and the crest foam all add.
+    foam = clamp(foam + boatFoam(vWorldPos.xz, uTime) + wakeFoam(vWorldPos.xz), 0.0, 1.0);
     vec3 foamColor = vec3(0.92) * (0.25 + 0.75 * max(dot(N, uSunDir), 0.0) * bodyShadow)
                    * (uSunColor * 0.5 + vec3(0.5));
 
@@ -456,6 +488,9 @@ export class Ocean {
       // the FFT sea. Amplitude 0 = inert.
       uSwell: { value: new THREE.Vector4(1, 0, 0.0314, 0) }, // dirX,dirZ,k,amp
       uSwellWave: { value: new THREE.Vector2(0.556, 0) }, // omega, phase
+      // Persistent wake trail: each vec4 = (worldX, worldZ, ageNorm, strength).
+      uWake: { value: Array.from({ length: WAKE_MAX }, () => new THREE.Vector4(0, 0, 1, 0)) },
+      uWakeCount: { value: 0 },
       // Sky-driven values; SkySystem overwrites these via applySkyState().
       uSunDir: { value: new THREE.Vector3(0.3, 0.7, 0.2).normalize() },
       uSunColor: { value: new THREE.Color(1.0, 0.95, 0.85) },
@@ -594,6 +629,37 @@ export class Ocean {
   setBoatState(x, z, fwdX, fwdZ, speedMs) {
     this.uniforms.uBoatPosDir.value.set(x, z, fwdX, fwdZ);
     this.uniforms.uBoatSpeed.value = speedMs;
+  }
+
+  /**
+   * Record the boat's track into the persistent wake trail. A new point is
+   * dropped every ~1.5 m of travel while under way; points age out over
+   * WAKE_LIFE. The trail lives in WORLD space, so it stays where the boat has
+   * been and curves through turns.
+   */
+  updateWake(x, z, speedMs, dt) {
+    if (!this._wake) this._wake = [];
+    const w = this._wake;
+    for (let i = 0; i < w.length; i++) w[i].age += dt;
+    while (w.length && w[0].age > WAKE_LIFE) w.shift();
+
+    const last = w[w.length - 1];
+    if (speedMs > 0.2 && (!last || Math.hypot(x - last.x, z - last.z) > 0.9)) {
+      if (w.length >= WAKE_MAX) w.shift();
+      w.push({ x, z, age: 0, str: Math.min(1, 0.4 + speedMs / 3) });
+    }
+
+    const arr = this.uniforms.uWake.value;
+    for (let i = 0; i < WAKE_MAX; i++) {
+      const pt = w[i];
+      if (pt) {
+        const a = pt.age / WAKE_LIFE;
+        arr[i].set(pt.x, pt.z, a, pt.str * (1 - a) * (1 - a));
+      } else {
+        arr[i].set(0, 0, 1, 0);
+      }
+    }
+    this.uniforms.uWakeCount.value = w.length;
   }
 
   /**

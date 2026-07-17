@@ -390,6 +390,8 @@ async function init() {
       _fwd.z / fwdLen,
       boatState.sog * 0.514444
     );
+    // Persistent curved wake trail (world-space).
+    ocean.updateWake(boatState.position.x, boatState.position.z, boatState.sog * 0.514444, frameDt);
     ocean.updateShadow(sky.sunLight);
 
     // Underwater veil when the camera dips below the local wave surface.
