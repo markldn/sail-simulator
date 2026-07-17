@@ -81,6 +81,7 @@ import { Rain } from './effects/Rain.js';
 import { Spindrift } from './effects/Spindrift.js';
 import { SoundSystem } from './audio/SoundSystem.js';
 import { SkySystem } from './environment/SkySystem.js';
+import { PlanarReflection } from './environment/PlanarReflection.js';
 import { WindManager, MS_TO_KNOTS } from './wind/WindManager.js';
 import { PhysicsWorld } from './physics/PhysicsWorld.js';
 import { HUD } from './ui/HUD.js';
@@ -175,6 +176,9 @@ async function init() {
   // Spindrift — spray torn off the wave crests, driven downwind in a blow.
   const spindrift = new Spindrift(scene);
   const _windVec = new THREE.Vector3();
+
+  // Planar reflection of the boat/world in the water surface.
+  const reflection = new PlanarReflection(768);
 
   // Procedural ambience (wind/sea/rush/rain/creak/slam). Browsers need a user
   // gesture before audio starts, so resume() on the first pointer/key event.
@@ -439,6 +443,14 @@ async function init() {
     }
 
     if (controls.enabled) controls.update();
+
+    // Planar reflection: mirror the above-water world into the ocean surface
+    // (water + its own spray excluded so it doesn't reflect into itself).
+    reflection.render(renderer, scene, camera, [
+      ocean.mesh, spray.points, runoff.points, rain.lines, spindrift.points,
+    ]);
+    ocean.setReflection(reflection.rt.texture, reflection.textureMatrix);
+
     composer.render();
   }
 

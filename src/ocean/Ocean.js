@@ -158,6 +158,9 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3  uDeepColor;     // water body color (light fully absorbed)
   uniform vec3  uScatterColor;  // color scattered back out near the surface
   uniform float uFogDensity;
+  uniform sampler2D uReflMap;   // planar reflection of the world
+  uniform mat4  uReflMatrix;    // world → reflection UV
+  uniform float uReflOn;        // 0 = analytic sky only, 1 = planar
   uniform vec2  uGridCenter;    // xz of the camera-snapped grid centre
   uniform float uGridHalf;      // half the grid side length (metres)
 
@@ -353,6 +356,20 @@ const FRAGMENT_SHADER = /* glsl */ `
     R.y = max(R.y, 0.02); // water can't reflect what's below the horizon
     vec3 reflected = skyColor(normalize(R));
 
+    // Planar reflection of the boat/world, distorted by the wave normal and
+    // faded back to the analytic sky off-screen and at grazing chop.
+    if (uReflOn > 0.5) {
+      vec4 rc = uReflMatrix * vec4(vWorldPos, 1.0);
+      if (rc.w > 0.0) {
+        vec2 ruv = rc.xy / rc.w + N.xz * 0.10; // ripple distortion
+        vec4 planar = texture2D(uReflMap, ruv);
+        // valid only inside the reflection viewport; fade at the edges
+        vec2 edge = min(ruv, 1.0 - ruv);
+        float inside = smoothstep(0.0, 0.05, min(edge.x, edge.y));
+        reflected = mix(reflected, planar.rgb, inside * planar.a);
+      }
+    }
+
     // ---- Water body: absorption + subsurface scattering ------------------
     // Light entering a wave gets scattered back out with the water's
     // characteristic blue-green. Strongest when looking towards the sun
@@ -491,6 +508,10 @@ export class Ocean {
       // Persistent wake trail: each vec4 = (worldX, worldZ, ageNorm, strength).
       uWake: { value: Array.from({ length: WAKE_MAX }, () => new THREE.Vector4(0, 0, 1, 0)) },
       uWakeCount: { value: 0 },
+      // Planar reflection (wired by main.js once the reflection pass exists).
+      uReflMap: { value: makeWhiteTexture() },
+      uReflMatrix: { value: new THREE.Matrix4() },
+      uReflOn: { value: 0 },
       // Sky-driven values; SkySystem overwrites these via applySkyState().
       uSunDir: { value: new THREE.Vector3(0.3, 0.7, 0.2).normalize() },
       uSunColor: { value: new THREE.Color(1.0, 0.95, 0.85) },
@@ -622,6 +643,13 @@ export class Ocean {
       }
       this.cascadeTextures[ci].needsUpdate = true;
     }
+  }
+
+  /** Wire the planar-reflection texture + world→UV matrix (see main.js). */
+  setReflection(texture, matrix) {
+    this.uniforms.uReflMap.value = texture;
+    this.uniforms.uReflMatrix.value.copy(matrix);
+    this.uniforms.uReflOn.value = 1;
   }
 
   /** Per-frame boat state for contact foam + wake (world XZ, unit forward,
