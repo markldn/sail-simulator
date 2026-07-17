@@ -76,6 +76,7 @@ const UnderwaterShader = {
 import { Ocean } from './ocean/Ocean.js';
 import { Boat } from './boat/Boat.js';
 import { Spray } from './effects/Spray.js';
+import { Runoff } from './effects/Runoff.js';
 import { SkySystem } from './environment/SkySystem.js';
 import { WindManager, MS_TO_KNOTS } from './wind/WindManager.js';
 import { PhysicsWorld } from './physics/PhysicsWorld.js';
@@ -163,6 +164,9 @@ async function init() {
 
   // Bow spray, fed by the slam detector inside the buoyancy loop.
   const spray = new Spray(scene);
+  // Water dripping/running off the decks and topsides after spray or green
+  // water (fed a "wetness" value in the render loop).
+  const runoff = new Runoff(scene);
 
   // ------------------------------------------------ debug wave-height probes
   // Three PBR spheres that follow ocean.getHeightAt() — the visual contract
@@ -280,6 +284,7 @@ async function init() {
   const _lookQ = new THREE.Quaternion(); // scratch: FPV look-around offset
   const _lookEuler = new THREE.Euler();
   let underwaterAmt = 0;
+  let deckWet = 0; // 0 dry … 1 streaming — decays as the boat dries out
 
   function animate() {
     requestAnimationFrame(animate);
@@ -314,11 +319,26 @@ async function init() {
     });
 
     // Bow spray: consume any slam the buoyancy loop flagged this frame.
+    const boatVel = boat.physics.body.linvel();
     if (boat.physics.slamIntensity > 0) {
-      spray.burst(boat.physics.slamPoint, boat.physics.body.linvel(), boat.physics.slamIntensity);
+      spray.burst(boat.physics.slamPoint, boatVel, boat.physics.slamIntensity);
+      // A slam leaves the foredeck streaming.
+      deckWet = Math.min(1, deckWet + 0.25 + boat.physics.slamIntensity * 0.12);
       boat.physics.slamIntensity = 0;
     }
     spray.update(frameDt);
+
+    // Runoff wetness: rises with green water (hull samples awash), a buried
+    // rail (heel), and slams; dries over a few seconds.
+    let awashN = 0;
+    const S = boat.physics.samples;
+    const D = boat.physics.lastDepth;
+    for (let i = 0; i < S.length; i++) if (D[i] >= S[i].columnHeight * 0.6) awashN++;
+    const awash = awashN / S.length; // fraction of the hull awash
+    const railDown = Math.max(0, (Math.abs(boatState.heel) - 22) / 45); // rail in the water
+    deckWet = Math.min(1, deckWet + (awash * 3.5 + railDown * 2.0) * frameDt);
+    deckWet = Math.max(0, deckWet - frameDt * 0.28); // ~3.5 s to dry
+    runoff.update(frameDt, boatState, boatVel, deckWet);
 
     // Keep the sun's shadow frustum on the boat.
     sky.trackShadowTarget(boatState.position);
