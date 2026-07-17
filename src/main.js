@@ -375,8 +375,9 @@ async function init() {
       time: elapsed,
     });
 
-    // Keep the sun's shadow frustum on the boat.
+    // Keep the sun's shadow frustum on the boat; drift the clouds downwind.
     sky.trackShadowTarget(boatState.position);
+    sky.updateClouds(frameDt, _windVec);
 
     // Boat → ocean shader: contact foam / wake, and the shadow map (which
     // only exists after the first shadowed render, hence wired here).

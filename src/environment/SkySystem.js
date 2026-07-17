@@ -36,20 +36,55 @@ export class SkySystem {
     u.mieCoefficient.value = 0.005; // aerosol scattering (sun halo)
     u.mieDirectionalG.value = 0.8; // halo tightness
 
-    // Stratus veil: a translucent grey dome INSIDE the sky dome. The
-    // Preetham model can only do clear skies — real overcast needs cloud
-    // between you and it. Opacity follows the overcast factor.
-    this.cloudDome = new THREE.Mesh(
-      new THREE.SphereGeometry(40000, 24, 12),
-      new THREE.MeshBasicMaterial({
-        color: 0x565b61,
-        side: THREE.BackSide,
-        transparent: true,
-        opacity: 0,
-        depthWrite: false,
-        fog: false,
-      })
-    );
+    // Cloud dome: a procedural fractal-cloud layer INSIDE the sky dome. The
+    // Preetham model can only do clear skies — real skies have cloud shapes.
+    // Coverage follows the overcast factor (a few fair-weather cumulus at 0,
+    // full stratus at 1); the layer drifts with the wind.
+    this.cloudMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      transparent: true,
+      depthWrite: false,
+      fog: false,
+      uniforms: {
+        uTime: { value: 0 },
+        uCoverage: { value: 0 }, // 0 clear-ish … 1 overcast
+        uWind: { value: new THREE.Vector2(0, 0) },
+        uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+        uSunColor: { value: new THREE.Color(1, 1, 1) },
+        uCloudColor: { value: new THREE.Color(0.8, 0.82, 0.86) },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vDir;
+        void main() {
+          vDir = (modelMatrix * vec4(position, 1.0)).xyz;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        varying vec3 vDir;
+        uniform float uTime, uCoverage;
+        uniform vec2 uWind;
+        uniform vec3 uSunDir, uSunColor, uCloudColor;
+        float hash(vec2 p){ p = fract(p*vec2(123.34,345.45)); p += dot(p,p+34.345); return fract(p.x*p.y); }
+        float noise(vec2 p){ vec2 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);
+          return mix(mix(hash(i),hash(i+vec2(1,0)),f.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x), f.y); }
+        float fbm(vec2 p){ float s=0.0,a=0.5; for(int i=0;i<5;i++){ s+=a*noise(p); p*=2.03; a*=0.5; } return s; }
+        void main(){
+          vec3 d = normalize(vDir);
+          if (d.y < 0.03) discard;                 // below the horizon
+          // project the view direction onto a cloud plane, drift with wind
+          vec2 uv = d.xz / (d.y + 0.16) * 1.3 + uWind; // uWind = accumulated drift
+          float f = fbm(uv);
+          float base = mix(0.72, 0.04, uCoverage); // more coverage → lower threshold
+          float density = smoothstep(base, base + 0.33, f);
+          density *= smoothstep(0.03, 0.20, d.y);  // dissolve at the horizon
+          float sd = max(dot(d, uSunDir), 0.0);
+          vec3 lit = uCloudColor + uSunColor * pow(sd, 8.0) * 0.5; // sun through cloud
+          vec3 col = mix(uCloudColor * 0.6, lit, density);
+          gl_FragColor = vec4(col, density);
+        }`,
+    });
+    this.cloudDome = new THREE.Mesh(new THREE.SphereGeometry(40000, 32, 16), this.cloudMat);
     scene.add(this.cloudDome);
 
     // --- Sun light --------------------------------------------------------
@@ -129,10 +164,16 @@ export class SkySystem {
       3.2 * THREE.MathUtils.smoothstep(elevationDeg, -2, 12) * (1 - 0.78 * o);
     // kill the sun's forward-scatter halo under cloud, veil the dome
     this.sky.material.uniforms.mieCoefficient.value = 0.005 * (1 - 0.85 * o);
-    this.cloudDome.material.opacity = o * 0.88;
-    this.cloudDome.material.color
-      .setRGB(0.4, 0.42, 0.46)
-      .multiplyScalar(0.25 + 0.75 * dayness);
+    // Feed the procedural cloud layer: coverage from overcast, colour greyed
+    // and dimmed at dusk / under cloud, sun direction for the lit edges.
+    const cu = this.cloudMat.uniforms;
+    cu.uCoverage.value = o;
+    cu.uSunDir.value.copy(this.sunLight.position).normalize();
+    cu.uSunColor.value.copy(this.sunLight.color);
+    cu.uCloudColor.value
+      .setRGB(0.86, 0.88, 0.92)
+      .multiplyScalar(0.28 + 0.72 * dayness)
+      .lerp(cloudGrey, o * 0.6);
     this.trackShadowTarget(this.sunLight.target.position);
 
     // --- representative colors for the ocean shader & fog ------------------
@@ -198,6 +239,18 @@ export class SkySystem {
     this.sunLight.position
       .copy(this.sunLight.target.position)
       .addScaledVector(this.sunDir, 150);
+  }
+
+  /**
+   * Drift the cloud layer downwind. Call each frame.
+   * @param {number} dt      frame delta
+   * @param {{x,z}} windVec  wind velocity (m/s)
+   */
+  updateClouds(dt, windVec) {
+    if (!this._cloudDrift) this._cloudDrift = this.cloudMat.uniforms.uWind.value;
+    const rate = 0.00035; // uv units per (m/s · s)
+    this._cloudDrift.x += windVec.x * rate * dt;
+    this._cloudDrift.y += windVec.z * rate * dt;
   }
 
   /** Bundle of values the ocean shader needs — see Ocean.applySkyState(). */
