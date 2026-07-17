@@ -11,7 +11,7 @@ export class HUD {
     this.root = document.createElement('div');
     this.root.id = 'hud';
     this.root.innerHTML = `
-      <div class="hud-row hud-title">⛵ SAILBOAT SIM <span class="hud-phase">phase 1 — ocean &amp; wind</span></div>
+      <div class="hud-row hud-title">⛵ SAILBOAT SIM <span class="hud-phase">high-fidelity sailing simulator</span></div>
       <div class="hud-grid">
         <div class="hud-cell"><label>TWS</label><output data-f="tws">—</output><small>kn</small></div>
         <div class="hud-cell"><label>TWD</label><output data-f="twd">—</output><small>°</small></div>
@@ -42,6 +42,11 @@ export class HUD {
    *   awa (deg), sail (deg). Omitted/null fields keep their display.
    */
   update(d) {
+    // Non-finite readouts render as "--" rather than "NaN" (instruments
+    // showing garbage during a physics hiccup helps nobody).
+    for (const k of ['tws', 'twd', 'sog', 'hdg', 'heel', 'awa', 'sail']) {
+      if (d[k] != null && !Number.isFinite(d[k])) d[k] = null;
+    }
     if (d.tws != null) this._fields.tws.textContent = d.tws.toFixed(1);
     if (d.twd != null) {
       this._fields.twd.textContent = Math.round(d.twd).toString().padStart(3, '0');

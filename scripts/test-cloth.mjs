@@ -114,6 +114,26 @@ function stats(sail) {
   check('CP inside the sail (1 < y < 7)', cp.y > 1 && cp.y < 7, `y=${cp.y.toFixed(2)}`);
 }
 
+// ---------------------------------------------------------------- storm stress
+// The black-screen bug's conditions: hurricane wind, cloth flogging
+// violently EDGE-ON (pinned flat, wind mostly along the sail plane).
+// The solver must stay finite and keep reporting finite integrated forces.
+{
+  console.log('\n▸ Hurricane wind 31 m/s, edge-on flogging, 30 s — stability');
+  const sail = makeSail();
+  pinEdges(sail);
+  run(sail, { x: -30, y: 0, z: 8 }, 30);
+  const s = stats(sail);
+  const F = sail.aeroForce;
+  console.log(
+    `    z∈[${s.minZ.toFixed(2)}, ${s.maxZ.toFixed(2)}]  |F|=${F.length().toFixed(0)} N`
+  );
+  check('no NaN after 30 s of storm flogging', s.finite);
+  check('integrated force stays finite', Number.isFinite(F.x + F.y + F.z));
+  check('cloth stays bounded (|z| < 4 m)', Math.abs(s.minZ) < 4 && Math.abs(s.maxZ) < 4,
+    `[${s.minZ.toFixed(2)}, ${s.maxZ.toFixed(2)}]`);
+}
+
 // ---------------------------------------------------------------- collision
 {
   console.log('\n▸ Rigging collision — cloth must not pass through a capsule');

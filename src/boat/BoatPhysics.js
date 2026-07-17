@@ -512,6 +512,15 @@ export class BoatPhysics {
    * @param {{main:{force,cp}, jib:{force,cp}}} data smoothed by Sails
    */
   setClothAero(data) {
+    // Reject anything non-finite at the boundary: a poisoned frame is
+    // simply dropped, the age grows stale, and the analytic fallback takes
+    // over until the cloth recovers.
+    const sum =
+      data.main.force.x + data.main.force.y + data.main.force.z +
+      data.jib.force.x + data.jib.force.y + data.jib.force.z +
+      data.main.cp.x + data.main.cp.y + data.main.cp.z +
+      data.jib.cp.x + data.jib.cp.y + data.jib.cp.z;
+    if (!Number.isFinite(sum)) return;
     this._cloth.main.force.copy(data.main.force);
     this._cloth.main.cp.copy(data.main.cp);
     this._cloth.jib.force.copy(data.jib.force);

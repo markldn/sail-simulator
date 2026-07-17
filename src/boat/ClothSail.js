@@ -271,7 +271,13 @@ export class ClothSail {
       for (let d = 0; d < 3; d++) {
         const x = pos[k + d];
         const acc = d === 0 ? ax : d === 1 ? ay : az;
-        pos[k + d] = x + (x - prev[k + d]) * DAMPING + acc * dt2;
+        // Per-substep travel cap (~70 m/s): violent flogging in storm winds
+        // must saturate, not feed back through the constraint solver into a
+        // numerical blow-up.
+        let v = (x - prev[k + d]) * DAMPING;
+        if (v > 0.4) v = 0.4;
+        else if (v < -0.4) v = -0.4;
+        pos[k + d] = x + v + acc * dt2;
         prev[k + d] = x;
       }
     }
@@ -358,12 +364,25 @@ export class ClothSail {
     this.geometry.computeVertexNormals();
   }
 
-  /** NaN watchdog — a blown-up sail is re-laid flat rather than left broken. */
+  /**
+   * NaN watchdog — a blown-up sail is re-laid flat rather than left broken.
+   * Checks a FREE interior particle plus the integrated force: the force is
+   * a sum over every triangle, so any poisoned particle poisons it — this
+   * catches blow-ups the old corner-particle check missed (corners can be
+   * pinned, and pins are always finite).
+   */
   isBroken() {
-    return !Number.isFinite(this.pos[0] + this.pos[this.n * 3 - 1]);
+    const mid = (this.n >> 1) * 3;
+    return !Number.isFinite(
+      this.pos[mid] + this.pos[mid + 1] + this.pos[mid + 2] +
+      this.aeroForce.x + this.aeroForce.y + this.aeroForce.z
+    );
   }
 
   reset() {
+    this.aeroForce.set(0, 0, 0);
+    this.aeroTorque.set(0, 0, 0);
+    this.pressureWeight = 0;
     for (let i = 0; i < this.rows; i++) {
       const s = i / (this.rows - 1);
       for (let j = 0; j < this.cols; j++) {

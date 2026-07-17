@@ -130,6 +130,14 @@ export class Sails {
     this._f = new THREE.Vector3();
   }
 
+  /** Re-lay both cloths flat and zero coupling output (boat reset). */
+  resetCloth() {
+    this.main.reset();
+    this.jib.reset();
+    this._out.main.force.set(0, 0, 0);
+    this._out.jib.force.set(0, 0, 0);
+  }
+
   /**
    * @param {object} aero  BoatPhysics.lastAero (incl. awBody wind vector)
    * @param {number} time  simulation clock
@@ -202,20 +210,34 @@ export class Sails {
         Fjz += this.jib.aeroForce.z;
       }
     }
-    if (this.main.isBroken()) this.main.reset();
-    if (this.jib.isBroken()) this.jib.reset();
+    const out = this._out;
+    if (this.main.isBroken()) {
+      this.main.reset();
+      out.main.force.set(0, 0, 0); // a NaN in the smoothed lerp is forever
+      Fm.set(0, 0, 0);
+    }
+    if (this.jib.isBroken()) {
+      this.jib.reset();
+      out.jib.force.set(0, 0, 0);
+      Fjx = Fjy = Fjz = 0;
+    }
     if (this.main.mesh.visible) this.main.commit();
     if (this.jib.mesh.visible) this.jib.commit();
 
     // Smooth force + CP and hand them to the physics (low-pass so cloth
     // flutter enlivens the readouts without shaking the rigid body).
+    // Everything crossing into the physics is sanitized: finite or zero,
+    // magnitude capped (20 kN — far above any sane sail load).
     const ka = 1 - Math.exp(-dt / 0.15);
-    const out = this._out;
     Fm.multiplyScalar(1 / CLOTH_SUBSTEPS);
+    if (!Number.isFinite(Fm.x + Fm.y + Fm.z)) Fm.set(0, 0, 0);
     out.main.force.lerp(this.main.mesh.visible ? Fm : Fm.set(0, 0, 0), ka);
+    if (out.main.force.lengthSq() > 4e8) out.main.force.setLength(20000);
     if (this.main.pressureWeight > 2) out.main.cp.lerp(this.main.pressureCentroid, ka);
     this._c.set(Fjx / CLOTH_SUBSTEPS, Fjy / CLOTH_SUBSTEPS, Fjz / CLOTH_SUBSTEPS);
+    if (!Number.isFinite(this._c.x + this._c.y + this._c.z)) this._c.set(0, 0, 0);
     out.jib.force.lerp(this.jib.mesh.visible ? this._c : this._c.set(0, 0, 0), ka);
+    if (out.jib.force.lengthSq() > 4e8) out.jib.force.setLength(20000);
     if (this.jib.pressureWeight > 2) out.jib.cp.lerp(this.jib.pressureCentroid, ka);
     this.onClothAero?.(out);
 

@@ -260,7 +260,12 @@ async function init() {
     underwaterPass.enabled = underwaterAmt > 0.01;
 
     // Chase target: keep orbiting around the boat as it drifts/sails.
-    if (cameraState.followBoat) {
+    // The finite check protects the camera: lerping toward a NaN target
+    // blacks out the entire render and never recovers.
+    if (
+      cameraState.followBoat &&
+      Number.isFinite(boatState.position.x + boatState.position.y + boatState.position.z)
+    ) {
       controls.target.lerp(
         { x: boatState.position.x, y: boatState.position.y + 1, z: boatState.position.z },
         0.08

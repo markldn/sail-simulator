@@ -87,5 +87,6 @@ export class Boat {
 
   reset() {
     this.physics.reset();
+    this.sails.resetCloth();
   }
 }
