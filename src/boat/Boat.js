@@ -61,7 +61,7 @@ export class Boat {
     this.model.position.copy(s.position);
     this.model.quaternion.copy(s.quaternion);
 
-    this.sails.update(this.physics.lastAero, time, dt);
+    this.sails.update(this.physics.lastAero, time, dt, this.physics.sailPlan);
     this._rudderMesh.rotation.y = -THREE.MathUtils.degToRad(this.helmState.rudderDeg);
 
     if (this.sampleMarkers.visible) {

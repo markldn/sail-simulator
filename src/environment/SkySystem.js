@@ -135,6 +135,17 @@ export class SkySystem {
   }
 
   /**
+   * Atmospheric mood (scenario presets): turbidity = haze/menace,
+   * rayleigh = blueness. Call setSun() afterwards to rebake the
+   * environment map — preset code does this via its applySun helper.
+   */
+  setAtmosphere(turbidity, rayleigh) {
+    const u = this.sky.material.uniforms;
+    if (turbidity != null) u.turbidity.value = turbidity;
+    if (rayleigh != null) u.rayleigh.value = rayleigh;
+  }
+
+  /**
    * Keep the sun's shadow frustum centred on the boat. Cheap (a couple of
    * vector ops) — call every frame with the boat position.
    */

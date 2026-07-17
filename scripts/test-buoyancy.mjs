@@ -28,9 +28,17 @@ function check(label, cond, detail) {
   if (!cond) failures++;
 }
 
-/** Minimal stand-in for Ocean: height + orbital velocity + settable clock. */
-function makeOcean(heightScale, choppiness) {
+/** Minimal stand-in for Ocean: height + orbital velocity + settable clock.
+ *  extraWave (optional) mimics the tsunami/rogue event-wave slot. */
+function makeOcean(heightScale, choppiness, extraWave = null) {
   const waves = createWaveSet();
+  if (extraWave) {
+    const k = (2 * Math.PI) / extraWave.wavelength;
+    waves.push({
+      dirX: 1, dirZ: 0, wavelength: extraWave.wavelength,
+      amplitude: extraWave.amplitude, phase: 0, k, omega: Math.sqrt(9.81 * k),
+    });
+  }
   return {
     t: 0,
     getHeightAt(x, z) {
@@ -45,10 +53,10 @@ function makeOcean(heightScale, choppiness) {
   };
 }
 
-async function runScenario(name, heightScale, choppiness, seconds) {
+async function runScenario(name, heightScale, choppiness, seconds, extraWave = null) {
   console.log(`\n▸ ${name}`);
   const pw = await PhysicsWorld.create();
-  const ocean = makeOcean(heightScale, choppiness);
+  const ocean = makeOcean(heightScale, choppiness, extraWave);
   const bp = new BoatPhysics(pw, ocean);
 
   const steps = Math.round(seconds / FIXED_DT);
@@ -108,6 +116,28 @@ async function runScenario(name, heightScale, choppiness, seconds) {
   check('not airborne (y < 3 m)', r.maxY < 3, `maxY=${r.maxY.toFixed(2)}`);
   check('no capsize (max |heel| < 35°)', r.maxAbsHeel < 35, `${r.maxAbsHeel.toFixed(1)}°`);
   check('no pitchpole (max |pitch| < 25°)', r.maxAbsPitch < 25, `${r.maxAbsPitch.toFixed(1)}°`);
+}
+
+// ---------------------------------------------------------------- Test 3
+// The tsunami preset: normal sea PLUS a 300 m / 8 m event wave. The wave is
+// long (max slope ≈ 9.6°), so a boat that rides the surface should climb
+// over it repeatedly without capsizing or being launched.
+{
+  const r = await runScenario(
+    'Tsunami — sea ×1.0 + 300 m / 8 m event wave (60 s)',
+    1.0,
+    0.8,
+    60,
+    { wavelength: 300, amplitude: 8 }
+  );
+  console.log(
+    `    y∈[${r.minY.toFixed(2)}, ${r.maxY.toFixed(2)}] m  maxHeel=${r.maxAbsHeel.toFixed(1)}°` +
+      `  maxPitch=${r.maxAbsPitch.toFixed(1)}°`
+  );
+  check('rides the wave down (y > -11 m)', r.minY > -11, `minY=${r.minY.toFixed(2)}`);
+  check('rides the wave up (y < 11 m)', r.maxY < 11, `maxY=${r.maxY.toFixed(2)}`);
+  check('no capsize (max |heel| < 45°)', r.maxAbsHeel < 45, `${r.maxAbsHeel.toFixed(1)}°`);
+  check('no pitchpole (max |pitch| < 35°)', r.maxAbsPitch < 35, `${r.maxAbsPitch.toFixed(1)}°`);
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`);

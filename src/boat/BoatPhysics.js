@@ -117,6 +117,11 @@ export class BoatPhysics {
     this.ocean = ocean;
     this.wind = wind;
     this.helm = helm ?? { rudderDeg: 0, sheetMaxDeg: 40, autoTrim: true };
+
+    // Sail plan: hoisted fraction per sail (1 = full sail, 0.4 = reefed,
+    // 0 = doused). GUI sliders write here; physics and visuals both read it.
+    this.sailPlan = { main: 1, jib: 1 };
+
     const RAPIER = physicsWorld.RAPIER;
 
     // Instrument/visual readout of the last aero solution, refreshed every
@@ -353,6 +358,21 @@ export class BoatPhysics {
     const liftZ = flowX * s + flowZ * c;
 
     for (const sail of SAILS) {
+      // Hoisted fraction: scales the area, and lowers the centre of effort
+      // (a reefed main loses its TOP, which is exactly why reefing tames
+      // heel far more than the area reduction alone suggests).
+      const hoist = this.sailPlan[sail.name] ?? 1;
+      if (hoist < 0.02) {
+        if (sail.name === 'main') {
+          aero.mainBetaDeg = 0;
+          aero.mainAlphaDeg = 0;
+          aero.luffing = false;
+        } else {
+          aero.jibBetaDeg = 0;
+        }
+        continue;
+      }
+
       // Sheet geometry: the boom weathervanes out to the sheet limit but
       // can never be pushed windward of the apparent wind (it would flog).
       const betaMax = this.helm.autoTrim
@@ -365,14 +385,17 @@ export class BoatPhysics {
       const beta = Math.min(betaMax, absAwa);
       const alpha = absAwa - beta;
 
-      const q = 0.5 * RHO_AIR * aws * aws * sail.area * cosHeel;
+      const q = 0.5 * RHO_AIR * aws * aws * sail.area * hoist * cosHeel;
       const L = q * sailCL(alpha);
       const D = q * sailCD(alpha);
 
       this._force
         .set(liftX * L + flowX * D, 0, liftZ * L + flowZ * D)
         .applyQuaternion(this._q);
-      const ceWorld = this._worldP.copy(sail.ce).applyQuaternion(this._q).add(this._pos);
+      const ceWorld = this._worldP
+        .set(sail.ce.x, sail.ce.y * (0.35 + 0.65 * hoist), sail.ce.z)
+        .applyQuaternion(this._q)
+        .add(this._pos);
       this.body.addForceAtPoint(this._force, ceWorld, true);
 
       if (sail.name === 'main') {

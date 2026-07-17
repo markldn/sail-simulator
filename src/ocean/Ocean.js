@@ -49,8 +49,12 @@ const SEA_ROT_RATE = THREE.MathUtils.degToRad(6); // rad/s max direction swing
 // ---------------------------------------------------------------------------
 // Vertex shader — Gerstner displacement + analytic surface derivatives
 // ---------------------------------------------------------------------------
+// One extra mutable uniform slot beyond the fixed spectrum: the "event
+// wave" (tsunami / rogue-wave presets). Amplitude 0 keeps it inert.
+const WAVE_SLOTS = NUM_WAVES + 1;
+
 const VERTEX_SHADER = /* glsl */ `
-  #define NUM_WAVES ${NUM_WAVES}
+  #define NUM_WAVES ${WAVE_SLOTS}
   #define TWO_PI 6.28318530718
   #define GRAVITY ${GRAVITY.toFixed(4)}
 
@@ -253,6 +257,18 @@ export class Ocean {
 
     // The wave set shared with physics. Ocean owns it; physics asks Ocean.
     this.waves = createWaveSet();
+
+    // Event-wave slot (tsunami/rogue presets): lives INSIDE this.waves and
+    // the uniform array, so the CPU buoyancy queries and the GPU surface
+    // stay in lockstep by construction. See setSwell()/_syncSwellSlot().
+    const k0 = (2 * Math.PI) / 200;
+    this._swellSlot = {
+      dirX: 1, dirZ: 0, wavelength: 200, amplitude: 0, phase: 0,
+      k: k0, omega: Math.sqrt(GRAVITY * k0),
+    };
+    this.waves.push(this._swellSlot);
+    this._swellDesired = null; // {bearingDeg, wavelength, amplitude}
+
     const packed = packWaveUniforms(this.waves);
 
     this.uniforms = {
@@ -335,6 +351,56 @@ export class Ocean {
     return target.set(v.x, v.y, v.z);
   }
 
+  /**
+   * Launch (or retune) the event wave.
+   * @param {object} p {bearingDeg: compass direction it TRAVELS TOWARDS,
+   *                    wavelength: m, amplitude: m}
+   */
+  setSwell(p) {
+    this._swellDesired = p;
+    this._syncSwellSlot();
+  }
+
+  clearSwell() {
+    this._swellDesired = null;
+    this._syncSwellSlot();
+  }
+
+  /**
+   * Keep the event-wave slot consistent every frame. Two compensations:
+   * - the slot sits inside the wave array, which is globally rotated by
+   *   waveRot (sea-follows-wind) — so we pre-rotate its direction by
+   *   −waveRot to keep its ABSOLUTE bearing fixed as the sea swings;
+   * - amplitudes are globally scaled by heightScale — so we store
+   *   amplitude/heightScale to keep the event wave's TRUE height fixed.
+   * The uniform Vector4 is updated with the identical numbers, so CPU
+   * height queries and the rendered surface cannot disagree.
+   */
+  _syncSwellSlot() {
+    const slot = this._swellSlot;
+    const u4 = this.uniforms.uWaves.value[this.waves.length - 1];
+    if (!this._swellDesired) {
+      slot.amplitude = 0;
+      u4.w = 0;
+      return;
+    }
+    const d = this._swellDesired;
+    if (slot.wavelength !== d.wavelength) {
+      slot.wavelength = d.wavelength;
+      slot.k = (2 * Math.PI) / d.wavelength;
+      slot.omega = Math.sqrt(GRAVITY * slot.k);
+    }
+    const b = THREE.MathUtils.degToRad(d.bearingDeg);
+    const wx = Math.sin(b);
+    const wz = -Math.cos(b);
+    const c = Math.cos(-this.waveRot);
+    const s = Math.sin(-this.waveRot);
+    slot.dirX = wx * c - wz * s;
+    slot.dirZ = wx * s + wz * c;
+    slot.amplitude = d.amplitude / Math.max(this.heightScale, 0.02);
+    u4.set(slot.dirX, slot.dirZ, slot.wavelength, slot.amplitude);
+  }
+
   /** Target wave-field rotation so the spectrum travels dead downwind. */
   _windTargetRot(wind) {
     const b = THREE.MathUtils.degToRad(wind.directionDeg + 180); // travel bearing
@@ -381,6 +447,9 @@ export class Ocean {
       this.waveRot += THREE.MathUtils.clamp(diff, -maxStep, maxStep);
       this.uniforms.uWaveRot.value = this.waveRot;
     }
+
+    // Event wave must re-compensate for whatever rot/height just changed.
+    this._syncSwellSlot();
 
     if (camera) {
       this.mesh.position.x = Math.round(camera.position.x / this.gridStep) * this.gridStep;

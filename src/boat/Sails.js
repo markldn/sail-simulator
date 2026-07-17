@@ -50,7 +50,9 @@ function buildSailGrid(luffFn, chordDirX, chordLenFn) {
       const x = luff.x + chordDirX * c * chord;
       const y = luff.y;
       positions.push(x, y, 0);
-      base.push({ x, y, s, c, chord });
+      // luffX kept separately so the deformer can shrink the chord towards
+      // the luff (roller furling) without moving the luff itself.
+      base.push({ luffX: luff.x, y, s, c, chord, chordDirX });
     }
   }
   for (let i = 0; i < MAIN_SEGS_UP - 1; i++) {
@@ -125,10 +127,19 @@ export class Sails {
    * @param {object} aero  BoatPhysics.lastAero
    * @param {number} time  simulation clock (flutter phase)
    * @param {number} dt    frame delta (swing smoothing)
+   * @param {{main:number, jib:number}} plan hoisted fraction per sail
    */
-  update(aero, time, dt) {
+  update(aero, time, dt, plan = { main: 1, jib: 1 }) {
     if (Math.abs(aero.awaDeg) > 1) this._side = aero.awaDeg >= 0 ? 1 : -1;
     const side = this._side;
+
+    // Hoist visuals: the main reefs DOWNWARD (head drops towards the boom,
+    // like slab reefing), the jib rolls up around the forestay (chord
+    // shrinks towards the luff, like a furler).
+    this.mainMesh.visible = plan.main > 0.02;
+    this.mainMesh.scale.y = Math.max(plan.main, 0.05);
+    this.jibMesh.visible = plan.jib > 0.02;
+    const jibChord = Math.max(plan.jib, 0.05);
 
     // Smooth boom/jib swing (≈ e-fold in 1/6 s — a sheet, not a servo).
     const k = 1 - Math.exp(-dt * 6);
@@ -142,18 +153,25 @@ export class Sails {
     const draft = 0.06 + 0.08 * load; // fraction of chord
     const flutter = aero.luffing ? 1 : 0;
 
-    this._deform(this.mainMesh, this.mainBase, side, draft, flutter, time, 0);
-    this._deform(this.jibMesh, this.jibBase, side, draft, flutter, time, 2.1);
+    if (this.mainMesh.visible)
+      this._deform(this.mainMesh, this.mainBase, side, draft, flutter, time, 0, 1);
+    if (this.jibMesh.visible)
+      this._deform(this.jibMesh, this.jibBase, side, draft, flutter, time, 2.1, jibChord);
   }
 
-  /** Write camber (+ luff flutter) into the z of every sail vertex. */
-  _deform(mesh, base, side, draft, flutter, time, phase) {
+  /**
+   * Write camber (+ luff flutter) into every sail vertex; chordScale < 1
+   * rolls the sail towards its luff (furling).
+   */
+  _deform(mesh, base, side, draft, flutter, time, phase, chordScale) {
     const pos = mesh.geometry.attributes.position;
     for (let i = 0; i < base.length; i++) {
       const v = base[i];
+      pos.setX(i, v.luffX + v.chordDirX * v.c * v.chord * chordScale);
       // Belly: half-sine across the chord, bulging to leeward (-side),
       // tapering towards the head where the sail is flatter.
-      let z = -side * draft * v.chord * Math.sin(Math.PI * v.c) * (1 - 0.35 * v.s);
+      let z =
+        -side * draft * v.chord * chordScale * Math.sin(Math.PI * v.c) * (1 - 0.35 * v.s);
       // Flogging: travelling wave, strongest at the luff, zero at the leech.
       if (flutter > 0) {
         z +=

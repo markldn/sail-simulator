@@ -21,16 +21,44 @@ import GUI from 'lil-gui';
 export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm }) {
   const gui = new GUI({ title: 'Environment' });
 
+  const _tmpState = {};
+
   // --- Wind -----------------------------------------------------------------
+  // .listen() on the sliders keeps them honest when the point-of-sail
+  // buttons or scenario presets change the wind programmatically.
   const windFolder = gui.addFolder('Wind');
   windFolder
-    .add(wind, 'speedKnots', 0, 40, 0.5)
+    .add(wind, 'speedKnots', 0, 64, 0.5)
     .name('Speed (kn)')
+    .listen()
     .onChange((v) => wind.setSpeedKnots(v));
   windFolder
     .add(wind, 'directionDeg', 0, 360, 1)
     .name('Direction (° FROM)')
+    .listen()
     .onChange((v) => wind.setDirectionDeg(v));
+
+  // Point-of-sail buttons: set the wind RELATIVE to the boat's current
+  // heading, to study how the rig behaves on each point of sail.
+  const relWind = (relDeg) => {
+    const h = boat.physics.getState(_tmpState).heading;
+    wind.setDirectionDeg(Math.round(h + relDeg + 360) % 360);
+  };
+  const pos = windFolder.addFolder('Point of sail (vs boat)');
+  pos.add({ f: () => relWind(0) }, 'f').name('⇧ On the nose (no-go)');
+  pos.add({ f: () => relWind(-45) }, 'f').name('⬉ Close-hauled (port)');
+  pos.add({ f: () => relWind(-90) }, 'f').name('⬅ Beam reach (port)');
+  pos.add({ f: () => relWind(90) }, 'f').name('➡ Beam reach (stbd)');
+  pos.add({ f: () => relWind(135) }, 'f').name('⬊ Broad reach');
+  pos.add({ f: () => relWind(180) }, 'f').name('⇩ Dead run');
+  pos.close();
+
+  // --- Rig ------------------------------------------------------------------
+  // Physics reads sailPlan live; reefing also lowers the centre of effort,
+  // so less heel per m² — watch HEEL while dragging these in a blow.
+  const rigFolder = gui.addFolder('Rig');
+  rigFolder.add(boat.physics.sailPlan, 'main', 0, 1, 0.05).name('Mainsail hoist').listen();
+  rigFolder.add(boat.physics.sailPlan, 'jib', 0, 1, 0.05).name('Jib (furler)').listen();
 
   // --- Sea state --------------------------------------------------------------
   // With "Sea follows wind" on (default) the sliders are read-only displays
@@ -53,7 +81,11 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
     heightCtrl.enable(!auto);
     chopCtrl.enable(!auto);
   };
-  seaFolder.add(ocean, 'seaFollowsWind').name('Sea follows wind').onChange(syncSeaMode);
+  seaFolder
+    .add(ocean, 'seaFollowsWind')
+    .name('Sea follows wind')
+    .listen()
+    .onChange(syncSeaMode);
   syncSeaMode(ocean.seaFollowsWind);
 
   // --- Sky / sun ----------------------------------------------------------------
@@ -66,7 +98,83 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
   skyFolder.add(sky, 'azimuthDeg', 0, 360, 1).name('Sun azimuth (°)').onChange(applySun);
   skyFolder
     .add(renderer, 'toneMappingExposure', 0.1, 2, 0.01)
-    .name('Exposure');
+    .name('Exposure')
+    .listen();
+
+  // --- Scenarios --------------------------------------------------------------
+  // One-click situations. Fields left undefined keep their current value;
+  // swell.bearingRel aims the event wave relative to the boat's heading at
+  // the moment you press the button.
+  const PRESETS = {
+    '⛵ Fair sailing': {
+      windKn: 12, windDir: 315, sunElev: 32, sunAz: 155, turbidity: 6,
+      rayleigh: 1.8, fog: 0.0016, exposure: 0.5, main: 1, jib: 1,
+    },
+    '🌅 Calm dawn': {
+      windKn: 3, sunElev: 7, sunAz: 95, turbidity: 4, rayleigh: 2.2,
+      fog: 0.0022, exposure: 0.55, main: 1, jib: 1,
+    },
+    '💨 Fresh breeze': {
+      windKn: 18, sunElev: 48, turbidity: 5, rayleigh: 1.6,
+      fog: 0.0014, exposure: 0.5, main: 1, jib: 1,
+    },
+    '🌫 Fog bank': {
+      windKn: 7, sunElev: 22, turbidity: 9, fog: 0.012, exposure: 0.46,
+      main: 1, jib: 1,
+    },
+    // Reefed main, no jib — the seamanlike gale rig. Try full sail here
+    // and watch the knockdowns.
+    '⛈ Gale': {
+      windKn: 34, sunElev: 12, turbidity: 16, rayleigh: 0.6,
+      fog: 0.005, exposure: 0.4, main: 0.4, jib: 0,
+    },
+    // Storm canvas only. Survival conditions — expect to get rolled if
+    // you present the beam to the seas.
+    '🌀 Hurricane': {
+      windKn: 55, sunElev: 6, turbidity: 20, rayleigh: 0.5,
+      fog: 0.008, exposure: 0.34, main: 0.15, jib: 0,
+    },
+    // 300 m / 8 m event wave aimed at the bow. Deep-water tsunami — long
+    // and fast (~40 kn) rather than a breaking wall (that's a shoaling
+    // effect we don't model without a seabed).
+    '🌊 Tsunami': {
+      swell: { bearingRel: 180, wavelength: 300, amplitude: 8 },
+    },
+    // Shorter, steeper, from the quarter — the nasty one.
+    '👹 Rogue wave': {
+      swell: { bearingRel: 140, wavelength: 140, amplitude: 6 },
+    },
+  };
+
+  const applyPreset = (p) => {
+    if (p.windKn != null) wind.setSpeedKnots(p.windKn);
+    if (p.windDir != null) wind.setDirectionDeg(p.windDir);
+    if (p.main != null) boat.physics.sailPlan.main = p.main;
+    if (p.jib != null) boat.physics.sailPlan.jib = p.jib;
+    if (p.turbidity != null || p.rayleigh != null) sky.setAtmosphere(p.turbidity, p.rayleigh);
+    if (p.fog != null) sky.fogDensity = p.fog;
+    if (p.exposure != null) renderer.toneMappingExposure = p.exposure;
+    if (p.sunElev != null) sky.elevationDeg = p.sunElev;
+    if (p.sunAz != null) sky.azimuthDeg = p.sunAz;
+    ocean.seaFollowsWind = true;
+    syncSeaMode(true);
+    applySun(); // rebake sky/env + push colors & fog to the ocean
+    if (p.swell) {
+      const h = boat.physics.getState(_tmpState).heading;
+      ocean.setSwell({
+        bearingDeg: (h + p.swell.bearingRel + 360) % 360,
+        wavelength: p.swell.wavelength,
+        amplitude: p.swell.amplitude,
+      });
+    } else {
+      ocean.clearSwell();
+    }
+  };
+
+  const scenarioFolder = gui.addFolder('Scenarios');
+  for (const [name, p] of Object.entries(PRESETS)) {
+    scenarioFolder.add({ f: () => applyPreset(p) }, 'f').name(name);
+  }
 
   // --- Sailing ---------------------------------------------------------------------
   // .listen() keeps the widgets live when the keyboard (Helm.js) changes
