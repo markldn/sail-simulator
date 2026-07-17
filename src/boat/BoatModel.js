@@ -27,8 +27,8 @@ const SECTIONS = 24; // points per section, port sheer → keel → stbd sheer
 // --- materials --------------------------------------------------------------
 const MATERIALS = {
   topsides: new THREE.MeshStandardMaterial({
-    color: 0xf2f4f4, // white gelcoat
-    roughness: 0.22,
+    color: 0xe6eaea, // white gelcoat (kept a touch under pure white so the
+    roughness: 0.22, //  sunlit side doesn't clip straight to bloom)
     metalness: 0.0,
   }),
   antifoul: new THREE.MeshStandardMaterial({
@@ -172,7 +172,7 @@ export function createBoatModel() {
   rudder.name = 'rudder'; // Phase 3 rotates this with helm input
   boat.add(rudder);
 
-  // Mast + boom (sails arrive with the aero model in Phase 3).
+  // Mast. (The boom lives in Sails.js — it swings with the mainsail.)
   const mast = new THREE.Mesh(
     new THREE.CylinderGeometry(0.055, 0.075, HULL.mastHeight, 12),
     MATERIALS.spar
@@ -181,15 +181,14 @@ export function createBoatModel() {
   mast.name = 'mast';
   boat.add(mast);
 
-  const boom = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.045, 0.045, HULL.boomLength, 12),
-    MATERIALS.spar
-  );
-  boom.geometry.translate(0, -HULL.boomLength / 2, 0); // pivot at gooseneck
-  boom.rotation.z = Math.PI / 2; // swing aft along -X
-  boom.position.set(HULL.mastX, HULL.sheer + 1.05, 0);
-  boom.name = 'boom'; // Phase 3 rotates this with sheet trim
-  boat.add(boom);
+  // Self-shadowing (boom on deck, hull shading) is most of what makes the
+  // boat read as solid instead of washed-out under the bright sky.
+  boat.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
 
   return boat;
 }

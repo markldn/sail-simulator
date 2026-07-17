@@ -40,6 +40,15 @@
 
 import * as THREE from 'three';
 import { HULL, halfBreadth, stationX, sectionY } from './HullSpec.js';
+import { MS_TO_KNOTS } from '../wind/WindManager.js';
+import {
+  RHO_AIR,
+  ALPHA_OPT_DEG,
+  SHEET_MIN_DEG,
+  SHEET_MAX_DEG,
+  sailCL,
+  sailCD,
+} from './SailAero.js';
 
 const RHO_WATER = 1025; // kg/m³, salt water
 const G = 9.81;
@@ -70,16 +79,50 @@ export const TUNING = {
   rollDamp: 2500,
   yawDamp: 2500,
   pitchDamp: 8000,
+
+  // Rudder: a small balanced spade, F = ½·ρ·A·CL(2α)·U² at the blade.
+  rudderArea: 0.32, // m²
+  rudderCL: 1.3,
+  rudderMaxDeg: 32,
+  rudderCenter: new THREE.Vector3(HULL.rudderX, -0.55, 0), // body frame
 };
+
+/**
+ * Sail plan: area and centre of effort (body frame) per sail. CE height is
+ * what converts sail force into heel moment — no hand-tuned "heel factor"
+ * anywhere, it is just addForceAtPoint doing its job.
+ * sheetFactor: the jib is trimmed slightly tighter than the main.
+ */
+const SAILS = [
+  { name: 'main', area: 15, ce: new THREE.Vector3(HULL.mastX - 1.4, 4.0, 0), sheetFactor: 1.0 },
+  { name: 'jib', area: 10, ce: new THREE.Vector3(2.3, 3.2, 0), sheetFactor: 0.92 },
+];
 
 export class BoatPhysics {
   /**
    * @param {import('../physics/PhysicsWorld.js').PhysicsWorld} physicsWorld
    * @param {import('../ocean/Ocean.js').Ocean} ocean (or any {getHeightAt})
+   * @param {import('../wind/WindManager.js').WindManager} [wind]
+   *        omit (e.g. in buoyancy-only tests) to disable aero forces
+   * @param {{rudderDeg:number, sheetMaxDeg:number, autoTrim:boolean}} [helm]
+   *        live control state, written by ui/Helm.js
    */
-  constructor(physicsWorld, ocean) {
+  constructor(physicsWorld, ocean, wind = null, helm = null) {
     this.ocean = ocean;
+    this.wind = wind;
+    this.helm = helm ?? { rudderDeg: 0, sheetMaxDeg: 40, autoTrim: true };
     const RAPIER = physicsWorld.RAPIER;
+
+    // Instrument/visual readout of the last aero solution, refreshed every
+    // substep. Sails.js reads it to pose the boom and shape the cloth.
+    this.lastAero = {
+      awaDeg: 0, // signed: + = wind over starboard
+      awsKn: 0,
+      mainBetaDeg: 0, // boom angle off centreline
+      jibBetaDeg: 0,
+      mainAlphaDeg: 0,
+      luffing: false,
+    };
 
     // ---- rigid body ------------------------------------------------------
     this.spawn = new THREE.Vector3(0, ocean.getHeightAt(0, 0) + 0.35, 0);
@@ -142,6 +185,8 @@ export class BoatPhysics {
 
     // Preallocated temporaries — this code runs 60×/s, zero per-step GC.
     this._q = new THREE.Quaternion();
+    this._invQ = new THREE.Quaternion();
+    this._aw = new THREE.Vector3();
     this._pos = new THREE.Vector3();
     this._linvel = new THREE.Vector3();
     this._angvel = new THREE.Vector3();
@@ -174,6 +219,7 @@ export class BoatPhysics {
 
     this._pos.set(tr.x, tr.y, tr.z);
     this._q.set(rot.x, rot.y, rot.z, rot.w);
+    this._invQ.copy(this._q).invert();
     const lv = b.linvel();
     const av = b.angvel();
     this._linvel.set(lv.x, lv.y, lv.z);
@@ -224,10 +270,15 @@ export class BoatPhysics {
     this._force.copy(lat).multiplyScalar(fLat);
     b.addForceAtPoint(this._force, keelWP, true);
 
-    // ---- 4. rotational damping (body frame) -------------------------------
+    // ---- 4. sails + rudder (Phase 3) --------------------------------------
+    if (this.wind) {
+      this._applyAeroForces();
+      this._applyRudderForce();
+    }
+
+    // ---- 5. rotational damping (body frame) -------------------------------
     // ω in body frame: roll about X, yaw about Y, pitch about Z.
-    const invQ = this._q.clone().invert(); // one small alloc; acceptable
-    const wBody = this._torque.copy(this._angvel).applyQuaternion(invQ);
+    const wBody = this._torque.copy(this._angvel).applyQuaternion(this._invQ);
     wBody.set(
       -TUNING.rollDamp * wBody.x,
       -TUNING.yawDamp * wBody.y,
@@ -235,6 +286,114 @@ export class BoatPhysics {
     );
     wBody.applyQuaternion(this._q); // back to world
     b.addTorque(wBody, true);
+  }
+
+  /**
+   * Sail lift & drag from the apparent wind, one force per sail applied at
+   * its centre of effort. Everything downstream is emergent: heel (CE is
+   * high), weather helm (CEs are off the yaw axis), the no-go zone (close
+   * to the wind, lift points sideways and drag aft), and the oversheeted
+   * stall (α huge → CL collapses, CD balloons → heel without drive).
+   */
+  _applyAeroForces() {
+    const aero = this.lastAero;
+
+    // Apparent wind = air velocity − boat velocity, taken to the body frame.
+    // (Wind gradient with height ignored for now.)
+    this._aw.copy(this.wind.getWindVector()).sub(this._linvel);
+    this._aw.applyQuaternion(this._invQ);
+    const aws = Math.hypot(this._aw.x, this._aw.z);
+    aero.awsKn = aws * MS_TO_KNOTS;
+    if (aws < 0.2) {
+      aero.luffing = true;
+      return; // becalmed
+    }
+
+    // Direction air MOVES (flow) and the signed apparent wind angle.
+    const flowX = this._aw.x / aws;
+    const flowZ = this._aw.z / aws;
+    const awaRad = Math.atan2(-flowZ, -flowX); // angle of the FROM-direction
+    const awaDeg = THREE.MathUtils.radToDeg(awaRad);
+    const absAwa = Math.abs(awaDeg);
+    const side = awaDeg >= 0 ? 1 : -1; // +1: wind over starboard
+    aero.awaDeg = awaDeg;
+
+    // Heeling de-powers the rig (projected area shrinks).
+    const stbdY = this._axis.set(0, 0, 1).applyQuaternion(this._q).y;
+    const cosHeel = Math.sqrt(Math.max(1 - stbdY * stbdY, 0.05));
+
+    // Lift is perpendicular to the flow, rotated towards the bow — the
+    // rotation sign flips with tack. rot(v,θ): x' = x·c − z·s, z' = x·s + z·c
+    const th = (side * Math.PI) / 2;
+    const c = Math.cos(th);
+    const s = Math.sin(th);
+    const liftX = flowX * c - flowZ * s;
+    const liftZ = flowX * s + flowZ * c;
+
+    for (const sail of SAILS) {
+      // Sheet geometry: the boom weathervanes out to the sheet limit but
+      // can never be pushed windward of the apparent wind (it would flog).
+      const betaMax = this.helm.autoTrim
+        ? THREE.MathUtils.clamp(absAwa - ALPHA_OPT_DEG, SHEET_MIN_DEG, SHEET_MAX_DEG)
+        : THREE.MathUtils.clamp(
+            this.helm.sheetMaxDeg * sail.sheetFactor,
+            SHEET_MIN_DEG,
+            SHEET_MAX_DEG
+          );
+      const beta = Math.min(betaMax, absAwa);
+      const alpha = absAwa - beta;
+
+      const q = 0.5 * RHO_AIR * aws * aws * sail.area * cosHeel;
+      const L = q * sailCL(alpha);
+      const D = q * sailCD(alpha);
+
+      this._force
+        .set(liftX * L + flowX * D, 0, liftZ * L + flowZ * D)
+        .applyQuaternion(this._q);
+      const ceWorld = this._worldP.copy(sail.ce).applyQuaternion(this._q).add(this._pos);
+      this.body.addForceAtPoint(this._force, ceWorld, true);
+
+      if (sail.name === 'main') {
+        aero.mainBetaDeg = beta;
+        aero.mainAlphaDeg = alpha;
+        aero.luffing = alpha < 4 && aws > 1;
+      } else {
+        aero.jibBetaDeg = beta;
+      }
+    }
+  }
+
+  /**
+   * The rudder is a lifting foil in the local water flow. Force scales with
+   * flow speed SQUARED → no boat speed, no steering. Because the flow used
+   * is the blade's own velocity (v + ω×r), the rudder also naturally damps
+   * yaw and weathervanes the stern into any leeway.
+   */
+  _applyRudderForce() {
+    const wp = this._worldP
+      .copy(TUNING.rudderCenter)
+      .applyQuaternion(this._q)
+      .add(this._pos);
+
+    // Water flow relative to the blade, in the body frame.
+    this._r.copy(wp).sub(this._pos);
+    this._vPoint.copy(this._angvel).cross(this._r).add(this._linvel);
+    this._aw.copy(this._vPoint).multiplyScalar(-1).applyQuaternion(this._invQ);
+    const U = Math.hypot(this._aw.x, this._aw.z);
+    if (U < 0.05) return;
+
+    // Flow angle off dead-aft, and the blade's resulting angle of attack.
+    const gamma = Math.atan2(this._aw.z, -this._aw.x);
+    const rudderRad = THREE.MathUtils.degToRad(
+      THREE.MathUtils.clamp(this.helm.rudderDeg, -TUNING.rudderMaxDeg, TUNING.rudderMaxDeg)
+    );
+    const alphaR = THREE.MathUtils.clamp(rudderRad - gamma, -Math.PI / 4, Math.PI / 4);
+
+    // Side force in body +Z; sign: +rudder → stern pushed to port → bow
+    // yaws to STARBOARD (verified in the headless sailing test).
+    const F = -0.5 * RHO_WATER * TUNING.rudderArea * TUNING.rudderCL * Math.sin(2 * alphaR) * U * U;
+    this._force.set(0, 0, F).applyQuaternion(this._q);
+    this.body.addForceAtPoint(this._force, wp, true);
   }
 
   /** Respawn upright at the origin (GUI button / NaN recovery). */

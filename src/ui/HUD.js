@@ -24,7 +24,8 @@ export class HUD {
       <div class="hud-compass">
         <span class="hud-compass-n">N</span>
         <span class="hud-wind-arrow" title="wind blows this way">➤</span>
-      </div>`;
+      </div>
+      <div class="hud-help">←/→ helm &nbsp; ↑/↓ sheet &nbsp; T auto-trim &nbsp; R reset</div>`;
     parent.appendChild(this.root);
 
     // Cache field references once — update() runs every frame.

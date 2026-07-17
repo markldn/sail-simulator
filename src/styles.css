@@ -125,6 +125,13 @@ body {
   transition: transform 0.2s ease;
 }
 
+.hud-help {
+  margin-top: 8px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  opacity: 0.45;
+}
+
 /* lil-gui: nudge to match HUD translucency ---------------------------------- */
 .lil-gui {
   --background-color: rgba(10, 18, 26, 0.55);

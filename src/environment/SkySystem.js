@@ -39,6 +39,21 @@ export class SkySystem {
     // --- Sun light --------------------------------------------------------
     this.sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
     scene.add(this.sunLight);
+    scene.add(this.sunLight.target);
+
+    // Shadows: a tight ortho frustum around the boat (the only caster).
+    // trackShadowTarget() re-centres it every frame as the boat sails off.
+    this.sunLight.castShadow = true;
+    this.sunLight.shadow.mapSize.set(2048, 2048);
+    const sc = this.sunLight.shadow.camera;
+    sc.left = -14;
+    sc.right = 14;
+    sc.top = 14;
+    sc.bottom = -14;
+    sc.near = 20;
+    sc.far = 400;
+    this.sunLight.shadow.bias = -0.0002;
+    this.sunLight.shadow.normalBias = 0.02;
 
     // --- IBL plumbing ------------------------------------------------------
     this.pmrem = new THREE.PMREMGenerator(renderer);
@@ -84,7 +99,7 @@ export class SkySystem {
     const noonWhite = new THREE.Color(1.0, 0.98, 0.95);
     this.sunLight.color.copy(horizonAmber).lerp(noonWhite, dayness);
     this.sunLight.intensity = 3.2 * THREE.MathUtils.smoothstep(elevationDeg, -2, 12);
-    this.sunLight.position.copy(this.sunDir).multiplyScalar(200);
+    this.trackShadowTarget(this.sunLight.target.position);
 
     // --- representative colors for the ocean shader & fog ------------------
     // Approximations of what the Preetham model produces at this elevation;
@@ -117,6 +132,17 @@ export class SkySystem {
     this._envRT = this.pmrem.fromScene(this._envScene);
     this.scene.add(this.sky); // hand it back to the visible scene
     this.scene.environment = this._envRT.texture;
+  }
+
+  /**
+   * Keep the sun's shadow frustum centred on the boat. Cheap (a couple of
+   * vector ops) — call every frame with the boat position.
+   */
+  trackShadowTarget(pos) {
+    this.sunLight.target.position.set(pos.x, 0, pos.z);
+    this.sunLight.position
+      .copy(this.sunLight.target.position)
+      .addScaledVector(this.sunDir, 150);
   }
 
   /** Bundle of values the ocean shader needs — see Ocean.applySkyState(). */

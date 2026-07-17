@@ -16,8 +16,9 @@ import GUI from 'lil-gui';
  * @param {{visible: boolean}}                           deps.probes debug wave-height probes group
  * @param {import('../boat/Boat.js').Boat}               deps.boat
  * @param {{followBoat: boolean}}                        deps.cameraState
+ * @param {import('./Helm.js').Helm}                     deps.helm
  */
-export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState }) {
+export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm }) {
   const gui = new GUI({ title: 'Environment' });
 
   // --- Wind -----------------------------------------------------------------
@@ -58,10 +59,18 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
     .add(renderer, 'toneMappingExposure', 0.1, 2, 0.01)
     .name('Exposure');
 
+  // --- Sailing ---------------------------------------------------------------------
+  // .listen() keeps the widgets live when the keyboard (Helm.js) changes
+  // the same state object.
+  const sailFolder = gui.addFolder('Sailing');
+  sailFolder.add(helm.state, 'autoTrim').name('Auto-trim (T)').listen();
+  sailFolder.add(helm.state, 'sheetMaxDeg', 8, 88, 1).name('Sheet (↑ in / ↓ out)').listen();
+  sailFolder.add(helm.state, 'rudderDeg', -32, 32, 1).name('Rudder (← / →)').listen();
+
   // --- Boat -----------------------------------------------------------------------
   const boatFolder = gui.addFolder('Boat');
   boatFolder.add(cameraState, 'followBoat').name('Camera follows boat');
-  boatFolder.add({ reset: () => boat.reset() }, 'reset').name('Reset boat ⟲');
+  boatFolder.add({ reset: () => boat.reset() }, 'reset').name('Reset boat ⟲ (R)');
 
   // --- Debug ---------------------------------------------------------------------
   const debugFolder = gui.addFolder('Debug');

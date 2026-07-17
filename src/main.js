@@ -34,6 +34,7 @@ import { SkySystem } from './environment/SkySystem.js';
 import { WindManager, MS_TO_KNOTS } from './wind/WindManager.js';
 import { PhysicsWorld } from './physics/PhysicsWorld.js';
 import { HUD } from './ui/HUD.js';
+import { Helm } from './ui/Helm.js';
 import { createControlPanel } from './ui/ControlPanel.js';
 
 async function init() {
@@ -45,11 +46,16 @@ async function init() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 0.55; // Preetham sky is bright; tame it
+  renderer.toneMappingExposure = 0.5; // Preetham sky is bright; tame it
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   document.getElementById('app').appendChild(renderer.domElement);
 
   // ------------------------------------------------------------------- scene
   const scene = new THREE.Scene();
+  // Full-strength sky IBL washes the PBR materials out; direct sun +
+  // shadows carry the modelling, the environment just fills.
+  scene.environmentIntensity = 0.5;
 
   const camera = new THREE.PerspectiveCamera(
     55,
@@ -81,8 +87,12 @@ async function init() {
 
   const wind = new WindManager({ speedKnots: 12, directionDeg: 315 });
 
-  // The boat: visual model + rigid body + buoyancy (see src/boat/).
-  const boat = new Boat(scene, physics, ocean);
+  // Helm before boat: physics keeps a live reference to helm.state.
+  const helm = new Helm();
+
+  // The boat: model + rigid body + buoyancy + sails (see src/boat/).
+  const boat = new Boat(scene, physics, ocean, wind, helm.state);
+  helm.onReset = () => boat.reset();
 
   // ------------------------------------------------ debug wave-height probes
   // Three PBR spheres that follow ocean.getHeightAt() — the visual contract
@@ -113,7 +123,7 @@ async function init() {
   const hud = new HUD();
   const cameraState = { followBoat: true };
   wind.onChange((w) => hud.update({ tws: w.speedKnots, twd: w.directionDeg }));
-  createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState });
+  createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm });
 
   // ----------------------------------------------------------- post-processing
   const composer = new EffectComposer(renderer);
@@ -121,9 +131,10 @@ async function init() {
 
   const bloom = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.35, // strength — subtle; only sun disc + glints should bloom
+    0.28, // strength — subtle; only sun disc + glints should bloom
     0.55, // radius
-    0.9 //   threshold — in HDR, so >0.9 means "brighter than diffuse white"
+    1.15 // threshold — safely above sunlit white surfaces (the hull was
+    //      blooming at 0.9, which is what washed the whole boat out)
   );
   composer.addPass(bloom);
 
@@ -159,11 +170,22 @@ async function init() {
     // a ≤16 ms approximation, well below anything visible.)
     ocean.update(elapsed, camera);
 
+    helm.update(frameDt); // move rudder/sheet from held keys
     physics.step(frameDt);
 
-    // Snap the boat mesh to its rigid body; feed the instruments.
-    const boatState = boat.updateVisuals();
-    hud.update({ sog: boatState.sog, hdg: boatState.heading, heel: boatState.heel });
+    // Snap the boat mesh to its rigid body; pose sails; feed instruments.
+    const boatState = boat.updateVisuals(elapsed, frameDt);
+    const aero = boat.physics.lastAero;
+    hud.update({
+      sog: boatState.sog,
+      hdg: boatState.heading,
+      heel: boatState.heel,
+      awa: aero.awaDeg,
+      sail: aero.mainBetaDeg,
+    });
+
+    // Keep the sun's shadow frustum on the boat.
+    sky.trackShadowTarget(boatState.position);
 
     // Chase target: keep orbiting around the boat as it drifts/sails.
     if (cameraState.followBoat) {
