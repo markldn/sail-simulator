@@ -30,6 +30,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import { Ocean } from './ocean/Ocean.js';
 import { Boat } from './boat/Boat.js';
+import { Spray } from './effects/Spray.js';
 import { SkySystem } from './environment/SkySystem.js';
 import { WindManager, MS_TO_KNOTS } from './wind/WindManager.js';
 import { PhysicsWorld } from './physics/PhysicsWorld.js';
@@ -97,6 +98,9 @@ async function init() {
   const boat = new Boat(scene, physics, ocean, wind, helm.state);
   helm.onReset = () => boat.reset();
 
+  // Bow spray, fed by the slam detector inside the buoyancy loop.
+  const spray = new Spray(scene);
+
   // ------------------------------------------------ debug wave-height probes
   // Three PBR spheres that follow ocean.getHeightAt() — the visual contract
   // test between the CPU wave math and the GPU surface (see file header).
@@ -125,7 +129,7 @@ async function init() {
   // ---------------------------------------------------------------------- UI
   const hud = new HUD();
   const cameraState = { followBoat: true };
-  wind.onChange((w) => hud.update({ tws: w.speedKnots, twd: w.directionDeg }));
+  // (TWS/TWD are fed per-frame in the loop now — the actual, gusty values.)
   createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm });
 
   // ----------------------------------------------------------- post-processing
@@ -168,6 +172,9 @@ async function init() {
     const frameDt = clock.getDelta();
     const elapsed = clock.elapsedTime;
 
+    // Wind turbulence first — physics below reads the gusty actual values.
+    wind.update(elapsed);
+
     // Advance the ocean clock FIRST: the buoyancy hooks inside physics.step
     // query ocean.getHeightAt(), which must see the same time the water is
     // rendered with this frame. (Substeps within a frame share this time —
@@ -182,12 +189,21 @@ async function init() {
     const boatState = boat.updateVisuals(elapsed, frameDt);
     const aero = boat.physics.lastAero;
     hud.update({
+      tws: wind.speedKnotsActual,
+      twd: wind.directionDegActual,
       sog: boatState.sog,
       hdg: boatState.heading,
       heel: boatState.heel,
       awa: aero.awaDeg,
       sail: aero.mainBetaDeg,
     });
+
+    // Bow spray: consume any slam the buoyancy loop flagged this frame.
+    if (boat.physics.slamIntensity > 0) {
+      spray.burst(boat.physics.slamPoint, boat.physics.body.linvel(), boat.physics.slamIntensity);
+      boat.physics.slamIntensity = 0;
+    }
+    spray.update(frameDt);
 
     // Keep the sun's shadow frustum on the boat.
     sky.trackShadowTarget(boatState.position);

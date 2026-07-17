@@ -37,6 +37,9 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
     .name('Direction (° FROM)')
     .listen()
     .onChange((v) => wind.setDirectionDeg(v));
+  windFolder.add(wind, 'gustsEnabled').name('Gusts & shifts');
+  windFolder.add(wind, 'gustiness', 0, 0.5, 0.01).name('Gust strength');
+  windFolder.add(wind, 'shiftRange', 0, 25, 1).name('Shift range (±°)');
 
   // Point-of-sail buttons: set the wind RELATIVE to the boat's current
   // heading, to study how the rig behaves on each point of sail.

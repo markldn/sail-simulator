@@ -199,6 +199,12 @@ export class BoatPhysics {
     // Last submersion depth per sample (for the debug markers).
     this.lastDepth = new Float32Array(this.samples.length);
 
+    // Bow-slam detector, consumed by the spray effect: the hardest
+    // downward water impact seen at a forward station since the last time
+    // main.js read it and zeroed it.
+    this.slamIntensity = 0; // m/s of impact beyond the spray threshold
+    this.slamPoint = new THREE.Vector3();
+
     // Preallocated temporaries — this code runs 60×/s, zero per-step GC.
     this._q = new THREE.Quaternion();
     this._invQ = new THREE.Quaternion();
@@ -265,6 +271,16 @@ export class BoatPhysics {
       this._r.copy(wp).sub(this._pos);
       this._vPoint.copy(this._angvel).cross(this._r).add(this._linvel);
       const relVy = this._vPoint.y - this._waterVel.y;
+
+      // Slam detection: a forward station driving down into the water
+      // faster than ~1.3 m/s relative throws spray (read by main.js).
+      if (s.local.x > 1.6 && depth < 0.6) {
+        const impact = -relVy - 1.3;
+        if (impact > this.slamIntensity) {
+          this.slamIntensity = impact;
+          this.slamPoint.copy(wp);
+        }
+      }
 
       const fBuoy = RHO_WATER * G * s.area * depth;
       const fDamp = -s.area * (TUNING.heaveLin + TUNING.heaveQuad * Math.abs(relVy)) * relVy;

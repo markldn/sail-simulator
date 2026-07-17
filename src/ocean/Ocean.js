@@ -136,6 +136,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform sampler2D uShadowMap; // sun shadow map (boat shadow on water)
   uniform mat4  uShadowMatrix;
   uniform float uShadowStrength; // 0 = shadow sampling off
+  uniform float uWhitecaps;     // 0 calm … 1 gale: how readily crests break
   uniform vec3  uSunDir;        // TOWARDS the sun, normalized
   uniform vec3  uSunColor;      // linear
   uniform vec3  uZenithColor;   // analytic sky gradient (matches SkySystem)
@@ -304,7 +305,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     // diffuse lighting so it darkens correctly at dusk.
     float foamNoise = vnoise(vWorldPos.xz * 1.7 + uTime * 0.15)
                     * vnoise(vWorldPos.xz * 0.23 - uTime * 0.02);
-    float foam = smoothstep(0.42, 0.85, vGrad.y + foamNoise * 0.35 - 0.18);
+    // Whitecapping: wind lowers the breaking threshold, so with a rising
+    // breeze progressively gentler crests carry foam (Beaufort look).
+    float foamLo = mix(0.42, 0.22, uWhitecaps);
+    float foam = smoothstep(foamLo, foamLo + 0.43, vGrad.y + foamNoise * 0.35 - 0.18);
     // Hull churn + wake join the natural crest foam.
     foam = clamp(foam + boatFoam(vWorldPos.xz, uTime), 0.0, 1.0);
     vec3 foamColor = vec3(0.92) * (0.25 + 0.75 * max(dot(N, uSunDir), 0.0) * bodyShadow)
@@ -382,6 +386,7 @@ export class Ocean {
       uShadowMap: { value: makeWhiteTexture() },
       uShadowMatrix: { value: new THREE.Matrix4() },
       uShadowStrength: { value: 0 },
+      uWhitecaps: { value: 0.15 },
     };
 
     // Plane built in the XZ plane directly (rotateX would complicate the
@@ -548,6 +553,13 @@ export class Ocean {
    */
   update(time, camera, dt = 0, wind = null) {
     this.uniforms.uTime.value = time;
+
+    // Whitecapping tracks the ACTUAL (gusty) wind: crests start breaking
+    // around 8 kn and the sea is fully streaked white by ~38 kn.
+    if (wind) {
+      const kn = wind.speedKnotsActual ?? wind.speedKnots;
+      this.uniforms.uWhitecaps.value = THREE.MathUtils.clamp((kn - 8) / 30, 0, 1);
+    }
 
     if (wind && this.seaFollowsWind && dt > 0) {
       const k = 1 - Math.exp(-dt / SEA_BUILD_TAU);
