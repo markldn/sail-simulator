@@ -27,7 +27,8 @@ export class Boat {
     this.helmState = helmState;
     this.physics = new BoatPhysics(physicsWorld, ocean, wind, helmState);
     this.sails = new Sails(this.model);
-    this._rudderMesh = this.model.getObjectByName('rudder');
+    this._rudderGroup = this.model.getObjectByName('rudder');
+    this._windex = this.model.getObjectByName('windex');
     this._state = {};
 
     // --- debug: buoyancy sample markers ------------------------------------
@@ -62,7 +63,11 @@ export class Boat {
     this.model.quaternion.copy(s.quaternion);
 
     this.sails.update(this.physics.lastAero, time, dt, this.physics.sailPlan);
-    this._rudderMesh.rotation.y = -THREE.MathUtils.degToRad(this.helmState.rudderDeg);
+    // +rudderDeg = bow to starboard: blade trailing edge swings starboard,
+    // tiller sweeps to port — matching real tiller geometry.
+    this._rudderGroup.rotation.y = THREE.MathUtils.degToRad(this.helmState.rudderDeg);
+    // Masthead windex points INTO the apparent wind.
+    this._windex.rotation.y = -THREE.MathUtils.degToRad(this.physics.lastAero.awaDeg);
 
     if (this.sampleMarkers.visible) {
       const { samples, lastDepth } = this.physics;
