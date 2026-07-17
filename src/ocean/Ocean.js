@@ -216,15 +216,24 @@ const FRAGMENT_SHADER = /* glsl */ `
   }
 
   // --- sun shadow (the boat shading the water) --------------------------------
-  // 3×3 PCF against the DirectionalLight's shadow map. Outside the shadow
-  // camera's frustum (which tracks the boat) the water is simply unshadowed.
+  // 3×3 PCF against the DirectionalLight's shadow map, widened well beyond
+  // the map's native sharpness: on water, surface ripple scatters the edge
+  // of any shadow, so crisp penumbras read as "object on a floor".
+  // Returns sun VISIBILITY in [1-uShadowStrength, 1]; the caller decides
+  // how strongly each lighting term responds (glints die completely in a
+  // shadow, the water body barely dims — see main()).
   float sunShadow() {
     if (uShadowStrength < 0.01) return 1.0;
     vec4 sc = uShadowMatrix * vec4(vWorldPos, 1.0);
     vec3 uvz = sc.xyz / sc.w;
-    if (any(lessThan(uvz, vec3(0.001))) || any(greaterThan(uvz, vec3(0.999)))) return 1.0;
+    if (uvz.z <= 0.0 || uvz.z >= 1.0) return 1.0;
+    // Fade to unshadowed near the frustum border so long mast/sail streaks
+    // dissolve instead of being guillotined at the shadow camera's edge.
+    vec2 edge = min(uvz.xy, 1.0 - uvz.xy);
+    float rim = smoothstep(0.0, 0.09, min(edge.x, edge.y));
+    if (rim <= 0.0) return 1.0;
     float lit = 0.0;
-    vec2 texel = vec2(1.0 / 2048.0) * 1.4;
+    vec2 texel = vec2(1.0 / 2048.0) * 3.2;
     for (int i = -1; i <= 1; i++) {
       for (int j = -1; j <= 1; j++) {
         float d = unpackRGBAToDepth(
@@ -233,7 +242,7 @@ const FRAGMENT_SHADER = /* glsl */ `
       }
     }
     lit /= 9.0;
-    return mix(1.0 - uShadowStrength, 1.0, lit);
+    return 1.0 - (1.0 - lit) * rim * uShadowStrength;
   }
 
   // --- analytic sky, kept consistent with SkySystem's fed colors ----------
@@ -261,7 +270,13 @@ const FRAGMENT_SHADER = /* glsl */ `
     float fresnel = 0.02 + 0.98 * pow(1.0 - NdotV, 5.0);
 
     // Sun visibility here (1 = lit, dips where the boat shades the water).
-    float shadow = sunShadow();
+    // Split response: specular glints need direct sun so they die entirely
+    // in shadow; the water BODY is lit by the whole sky dome, so blocking
+    // just the sun only mildly darkens it. This split is what makes a
+    // shadow on water look like water, not pavement.
+    float sunVis = sunShadow();
+    float shadow = sunVis;                    // for glints / direct sparkle
+    float bodyShadow = mix(1.0, sunVis, 0.4); // for scatter & foam lighting
 
     // ---- Sky reflection --------------------------------------------------
     vec3 R = reflect(-V, N);
@@ -275,8 +290,8 @@ const FRAGMENT_SHADER = /* glsl */ `
     float sunThrough = pow(max(dot(V, -uSunDir), 0.0), 3.0);
     float crestBoost = clamp(vHeight * 0.55 + 0.45, 0.0, 1.2);
     vec3 body = uDeepColor;
-    body += uScatterColor * (0.30 + 0.70 * max(dot(N, uSunDir), 0.0) * shadow) * 0.35;
-    body += uScatterColor * sunThrough * crestBoost * 0.85 * shadow;
+    body += uScatterColor * (0.30 + 0.70 * max(dot(N, uSunDir), 0.0) * bodyShadow) * 0.35;
+    body += uScatterColor * sunThrough * crestBoost * 0.85 * bodyShadow;
 
     // ---- Sun specular (sharp Blinn lobe; ACES + bloom shape the rest) ---
     vec3 H = normalize(uSunDir + V);
@@ -292,7 +307,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     float foam = smoothstep(0.42, 0.85, vGrad.y + foamNoise * 0.35 - 0.18);
     // Hull churn + wake join the natural crest foam.
     foam = clamp(foam + boatFoam(vWorldPos.xz, uTime), 0.0, 1.0);
-    vec3 foamColor = vec3(0.92) * (0.25 + 0.75 * max(dot(N, uSunDir), 0.0) * shadow)
+    vec3 foamColor = vec3(0.92) * (0.25 + 0.75 * max(dot(N, uSunDir), 0.0) * bodyShadow)
                    * (uSunColor * 0.5 + vec3(0.5));
 
     // ---- Composite -------------------------------------------------------
@@ -449,7 +464,9 @@ export class Ocean {
     if (sunLight.shadow.map && this.uniforms.uShadowStrength.value === 0) {
       this.uniforms.uShadowMap.value = sunLight.shadow.map.texture;
       this.uniforms.uShadowMatrix.value = sunLight.shadow.matrix;
-      this.uniforms.uShadowStrength.value = 0.7;
+      // Glints die almost completely in shadow; the water body only takes
+      // 40% of this (see the bodyShadow split in the fragment shader).
+      this.uniforms.uShadowStrength.value = 0.85;
     }
   }
 
