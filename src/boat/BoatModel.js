@@ -285,8 +285,12 @@ export function createBoatModel() {
   boat.name = 'boat';
   const M = buildMaterials();
 
-  boat.add(new THREE.Mesh(buildHullGeometry(), M.topsides));
-  boat.add(new THREE.Mesh(buildDeckGeometry(), M.deck));
+  const hullMesh = new THREE.Mesh(buildHullGeometry(), M.topsides);
+  hullMesh.name = 'hullMesh'; // Boat.js darkens/glosses this for the wet-deck look
+  boat.add(hullMesh);
+  const deckMesh = new THREE.Mesh(buildDeckGeometry(), M.deck);
+  deckMesh.name = 'deckMesh'; // Boat.js darkens/glosses this for the wet-deck look
+  boat.add(deckMesh);
 
   // --- toe rails, stanchions, lifelines along both sheers -------------------
   for (const side of [-1, 1]) {
@@ -339,8 +343,15 @@ export function createBoatModel() {
     const shell = new THREE.Mesh(new THREE.BoxGeometry(2.85, 1.76, 1.38), wallMat);
     shell.position.set(-0.32, HULL.sheer - 0.45, 0);
     interior.add(shell);
+    // Y offset must clear the hull's OWN deepest point (canoeDepth maxes out
+    // at HULL.bottom = 0.52 m below the DWL, i.e. no lower than
+    // HULL.sheer - 1.14) or this flat floor pokes out through the single-
+    // sided hull skin and is visible from outside/underneath — it was
+    // sitting at -1.32 (0.18 m below the hull's absolute deepest point,
+    // across nearly its whole footprint, not just near the keel), which is
+    // exactly that bug.
     const sole = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.03, 1.25), M.deck);
-    sole.position.set(-0.35, HULL.sheer - 1.32, 0);
+    sole.position.set(-0.35, HULL.sheer - 1.08, 0);
     interior.add(sole);
     for (const side of [-1, 1]) {
       const settee = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.30, 0.44), cushMat);

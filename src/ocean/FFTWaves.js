@@ -605,6 +605,24 @@ export class FFTOcean {
     for (const c of this.cascades) c.setWind(windSpeed, windDirRad);
   }
 
+  /**
+   * Re-tune wind PER CASCADE (finding #9): the swell cascade (index 0, the
+   * longest lengthscale) gets its own wind state, independent of the chop
+   * cascades. Ocean.js drives this with a much more slowly (and
+   * asymmetrically build/decay) lagged wind for the swell, so a fresh gale
+   * takes real time to raise a proper sea and a dying gale leaves a rolling
+   * leftover swell — while the chop keeps tracking the wind quickly, the
+   * way ripples and wavelets do in reality.
+   */
+  setWindSplit(swellWindSpeed, swellDirRad, chopWindSpeed, chopDirRad) {
+    this.windSpeed = chopWindSpeed;
+    this.windDirRad = chopDirRad;
+    this.cascades[0].setWind(swellWindSpeed, swellDirRad);
+    for (let i = 1; i < this.cascades.length; i++) {
+      this.cascades[i].setWind(chopWindSpeed, chopDirRad);
+    }
+  }
+
   /** Re-tune the directional spread (swell ξ, directionality δ) live. */
   setSpread(swell, delta) {
     if (swell !== this.swell) {
@@ -668,6 +686,27 @@ export class FFTOcean {
     // hull hover off the crest it appears to sit on).
     let h = 0;
     for (const c of this.cascades) h += c._bilinear(c.dispY, x, z);
+    return h;
+  }
+
+  /**
+   * Height as felt by HYDROSTATIC PRESSURE some `submergence` metres below
+   * the surface (the Smith effect, standard in seakeeping) — physics-only,
+   * NOT for rendering. The wave-varying part of subsurface pressure decays
+   * with depth as e^{-k·d}; treating the full instantaneous crest height as
+   * hydrostatic-everywhere over-excites the hull in the short-wave band a
+   * heavy hull should barely notice. Applied per cascade with its band's
+   * kMin (least-attenuated, most-energetic edge — same convention as
+   * velocityAt's depth attenuation), so the swell still lifts the whole hull
+   * while the chop stops rattling the keel a metre down.
+   */
+  effectiveHeightAt(x, z, submergence) {
+    let h = 0;
+    const d = Math.max(submergence, 0);
+    for (const c of this.cascades) {
+      const att = d > 0 ? Math.exp(-c.kMin * d) : 1;
+      h += c._bilinear(c.dispY, x, z) * att;
+    }
     return h;
   }
 

@@ -20,6 +20,10 @@ import GUI from 'lil-gui';
  */
 export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, cameraState, helm, sound }) {
   const gui = new GUI({ title: 'Environment' });
+  // On a phone the full-width panel would cover most of the screen and the
+  // 3D view (the actual point of the app) — start collapsed to a small tab;
+  // tapping it still opens the full panel same as desktop.
+  if (window.matchMedia?.('(pointer: coarse)').matches) gui.close();
 
   const _tmpState = {};
 

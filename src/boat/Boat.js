@@ -42,6 +42,23 @@ export class Boat {
     this._wheelSpin = this.model.getObjectByName('wheelSpin');
     this._state = {};
 
+    // --- wet-deck material feedback -----------------------------------------
+    // Water washing over the boat used to look instantly dry again the
+    // moment the wave passed and the Runoff droplets thinned out — nothing
+    // about the deck/hull SURFACE itself changed. Darkening + glossing the
+    // materials while `deckWet` (main.js) is elevated gives the just-washed
+    // look real persistence, the way wet teak/gelcoat actually reads.
+    this._deckMesh = this.model.getObjectByName('deckMesh');
+    this._hullMesh = this.model.getObjectByName('hullMesh');
+    if (this._deckMesh) {
+      this._deckDryRoughness = this._deckMesh.material.roughness;
+      this._deckDryColor = this._deckMesh.material.color.clone();
+    }
+    if (this._hullMesh) {
+      this._hullDryRoughness = this._hullMesh.material.roughness;
+      this._hullDryColor = this._hullMesh.material.color.clone();
+    }
+
     // --- debug: buoyancy sample markers ------------------------------------
     // One instanced sphere per sample; green = submerged (pushing), grey =
     // dry. Watching these while waves roll under the hull is the quickest
@@ -118,6 +135,30 @@ export class Boat {
       this.sampleMarkers.instanceColor.needsUpdate = true;
     }
     return s; // heading/heel/sog etc. for the HUD and chase camera
+  }
+
+  /**
+   * Wet-look feedback for the deck/hull (0 dry … 1 soaked), mirroring
+   * Sails.setWetness. Water washing over the boat used to look instantly
+   * dry again the moment the wave passed — the Runoff droplets are sparse
+   * and easy to miss, and nothing about the deck/hull SURFACE itself
+   * changed. Darkens + glosses the materials while `deckWet` (tracked in
+   * main.js from slams/awash hull samples/a buried rail, and already paced
+   * — wets fast, dries over several seconds) is elevated.
+   * @param {number} deckWet 0 (dry) … 1 (streaming)
+   */
+  setWetness(deckWet) {
+    const w = THREE.MathUtils.clamp(deckWet, 0, 1);
+    if (this._deckMesh) {
+      const m = this._deckMesh.material;
+      m.color.copy(this._deckDryColor).multiplyScalar(1 - 0.45 * w);
+      m.roughness = this._deckDryRoughness - 0.55 * w;
+    }
+    if (this._hullMesh) {
+      const m = this._hullMesh.material;
+      m.color.copy(this._hullDryColor).multiplyScalar(1 - 0.3 * w);
+      m.roughness = Math.max(this._hullDryRoughness - 0.2 * w, 0.05);
+    }
   }
 
   /**

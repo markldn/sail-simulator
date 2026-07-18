@@ -43,7 +43,6 @@ import { HULL, halfBreadth, stationX, sectionY } from './HullSpec.js';
 import { MS_TO_KNOTS } from '../wind/WindManager.js';
 import {
   RHO_AIR,
-  ALPHA_OPT_DEG,
   SHEET_MIN_DEG,
   SHEET_MAX_DEG,
   sailCL,
@@ -52,6 +51,23 @@ import {
 
 const RHO_WATER = 1025; // kg/m³, salt water
 const G = 9.81;
+
+/**
+ * Generic lifting-foil CL curve, shared by the keel and rudder (findings #1
+ * and #6 of the physics review): linear attached flow up to stall, blending
+ * over ~6° into the post-stall flat-plate cross-flow regime CL ≈ k·sinβ·cosβ.
+ * Odd function of betaRad (a keel/rudder is symmetric port/starboard).
+ */
+function foilCL(betaRad, clAlpha, betaStallRad, crossFlowK = 1.1) {
+  const sign = betaRad < 0 ? -1 : 1;
+  const b = Math.abs(betaRad);
+  const clStall = clAlpha * betaStallRad;
+  if (b <= betaStallRad) return sign * clAlpha * b;
+  const blendEnd = betaStallRad + THREE.MathUtils.degToRad(6);
+  const blend = THREE.MathUtils.smoothstep(b, betaStallRad, blendEnd);
+  const flatPlate = crossFlowK * Math.sin(b) * Math.cos(b);
+  return sign * THREE.MathUtils.lerp(clStall, Math.max(flatPlate, 0), blend);
+}
 
 // Buoyancy sample grid resolution (samples = NX × NU).
 const NX = 8; // stations along the hull
@@ -68,8 +84,17 @@ export const TUNING = {
   // Heave (vertical) damping per m² of column area, vs water-relative
   // velocity. Sized for ~0.3 of critical damping of the heave oscillator
   // (k = ρ·g·A_wp ≈ 100 kN/m, m = 2.5 t → c_crit ≈ 31 kN·s/m).
-  heaveLin: 900, // N·s/m per m²
-  heaveQuad: 1200, // N·s²/m² per m²
+  // Retuned up from 900/1200 for added mass (finding #3): the heave
+  // oscillator's effective inertia roughly doubles (m + m_a), so its
+  // critical damping grows by √(m_a-inclusive/m) ≈ 1.4× — scale the damping
+  // coefficients by the same factor to keep the same ~0.3-critical feel
+  // rather than suddenly going underdamped. Nudge by eye once sailing.
+  heaveLin: 1270, // N·s/m per m²
+  heaveQuad: 1560, // N·s²/m² per m²
+  // Added-mass coefficient (finding #3): a beamy semi-submerged canoe body
+  // accelerating vertically must also accelerate water around it. Ca ≈ 1.0
+  // for a semicircular section; this hull runs a little flatter aft.
+  addedMassCa: 0.9,
 
   // Forward drag (skin friction + residuary), F = -(lin + quad·|v|)·v.
   // ≈ 1.1 kN at 6 kn — plausible for a 7.4 m displacement hull.
@@ -92,27 +117,70 @@ export const TUNING = {
   waveMakingFnStart: 0.30,
   waveMakingFnSpan: 0.15,
 
-  // Keel + hull lateral resistance, applied at the keel centre of effort.
-  latLin: 400,
-  latQuad: 1800,
+  // Keel: a lifting foil (finding #1), not a damper — a real keel's side
+  // force scales with forward speed² × leeway angle, not lateral speed²
+  // alone, so it stays powerful at cruise speed and goes slack near a stop.
+  // Fin ~1.15 m span × 1.4 m chord ≈ 1.6 m²; the hull acts as a mirror
+  // plane → effective AR ≈ 2·span²/A ≈ 1.65, CLα = 2π/(1+2/AR) ≈ 2.8/rad.
+  // Stalls ~13° (CL ≈ 0.63), then decays toward the flat-plate cross-flow
+  // regime.
+  keelArea: 1.6, // m²
+  keelCLalpha: 2.8, // /rad
+  keelStallDeg: 13,
+  keelAR: 1.65,
+  keelCD0: 0.008,
+  // Residual damping: ~20% of the old pure-damping model, kept as a stand-in
+  // for hull sideways drag and roll-induced sway damping that the foil above
+  // doesn't cover, and to keep zero-forward-speed leeway from being
+  // frictionless (a stalled/near-stationary keel still has SOME resistance).
+  latLin: 80,
+  latQuad: 360,
   keelCenter: new THREE.Vector3(HULL.keelX, -0.9, 0), // body frame
 
-  // Body-frame rotational damping, N·m·s/rad.
-  rollDamp: 2500,
+  // Body-frame rotational damping, N·m·s/rad (roll: c1 + c2·|ω|, finding
+  // #10 — real roll damping is quadratic vortex shedding off the keel and
+  // bilges: small rolls (at anchor) are lightly damped, big storm rolls
+  // heavily damped. Tuned so a 15° free roll decays in ~4-6 cycles).
+  rollDampLin: 800,
+  rollDampQuad: 4000,
   yawDamp: 2500,
-  pitchDamp: 12000, // calms wave-driven plunge cycles (~10% critical)
+  // Retuned up alongside heaveLin/Quad for added mass (finding #3) — see
+  // note there.
+  pitchDamp: 16200, // calms wave-driven plunge cycles (~10% critical)
 
-  // Rudder: a small balanced spade, F = ½·ρ·A·CL(2α)·U² at the blade.
+  // Rudder: a small balanced spade foil (finding #6) — same lift-curve
+  // treatment as the keel, so it actually stalls instead of being strongest
+  // at 45°. AR ≈ 2·(0.9²)/0.32 ≈ 5 (deep narrow spade under the hull) →
+  // CLα = 2π/(1+2/5) ≈ 4.5/rad. Stalls ~18° (CL ≈ 1.4).
   rudderArea: 0.32, // m²
-  rudderCL: 1.3,
+  rudderCLalpha: 4.5, // /rad
+  rudderStallDeg: 18,
+  rudderAR: 5,
+  rudderCD0: 0.015,
   rudderMaxDeg: 32,
   rudderCenter: new THREE.Vector3(HULL.rudderX, -0.55, 0), // body frame
 
   // Windage: air drag on hull, cabin and rig. This is why a boat with
-  // flogging sails still drifts downwind.
+  // flogging sails still drifts downwind. windageArea is the BROADSIDE
+  // (beam-on) reference area; finding #11 scales it down toward the bow-on
+  // frontal area (~45% of broadside) as AWA swings forward, and adds the
+  // heeled rig's own presented area on top.
   windageArea: 3.5, // m² frontal-ish
   windageCd: 0.85,
   windageCenter: new THREE.Vector3(0, 0.8, 0), // deck level, body frame
+  windageMastArea: 2.2, // m² — mast/rigging/furled-sail area a knocked-down rig presents
+
+  // Submersion realism follow-up: when a wave buries the whole hull, the
+  // deck/cabin/topsides drag through water like any bluff body (not just
+  // air-drag windage, which fades out as the exposed area shrinks — see
+  // TUNING.windage* above and _hullSubmersion). Cd ~1.0 is a generic bluff
+  // shape; area is the deckhouse+topsides cross-section a buried hull
+  // presents.
+  hullAwashArea: 3.2, // m²
+  hullAwashCd: 1.0,
+  // A submerged sail is wet cloth dragged through water, not flying in air
+  // — Cd matches ClothSail.js's own WATER_CD for the same material.
+  sailWaterCd: 0.9,
 };
 
 /**
@@ -241,6 +309,20 @@ export class BoatPhysics {
 
     // Last submersion depth per sample (for the debug markers).
     this.lastDepth = new Float32Array(this.samples.length);
+    // Previous substep's water-relative vertical velocity per sample, for
+    // the added-mass finite difference (finding #3) — and whether that
+    // sample was wet last substep, so a fresh dry→wet transition doesn't
+    // diff against a stale/zeroed value and spike.
+    this.prevRelVy = new Float32Array(this.samples.length);
+    this._wasWet = new Uint8Array(this.samples.length);
+    // Per-sample cooldown gate for the breaking-wave impulse (finding #13) —
+    // rate-limits repeat hits so a persistently-folding patch under one
+    // column doesn't fire every single 60 Hz substep.
+    this.breakerCooldown = new Float32Array(this.samples.length);
+    // How buried the hull is (0 dry deck … 1 fully awash) — drives hull
+    // water-drag in and windage out as a wave buries the boat. Also read by
+    // main.js to drive the deck-wetness visual (Runoff/material sheen).
+    this._hullSubmersion = 0;
 
     // Bow-slam detector, consumed by the spray effect: the hardest
     // downward water impact seen at a forward station since the last time
@@ -263,6 +345,7 @@ export class BoatPhysics {
     this._r = new THREE.Vector3();
     this._vPoint = new THREE.Vector3();
     this._axis = new THREE.Vector3();
+    this._fwdAxis = new THREE.Vector3(); // world-frame body +X, held alongside _axis (lat)
     this._force = new THREE.Vector3();
     this._torque = new THREE.Vector3();
 
@@ -300,15 +383,35 @@ export class BoatPhysics {
     // waves surge and carry the boat (Stokes drift comes out for free).
     this._waterVelocityAt(tr.x, tr.z, this._waterVelC);
 
+    // Heel, shared by several drag/force terms below (findings #10, #11, #14).
+    const stbdY = this._axis.set(0, 0, 1).applyQuaternion(this._q).y;
+    const sinHeel = Math.abs(stbdY);
+
+    // Hull submersion (0 dry deck … 1 fully awash), from how deep the deck
+    // centre sits below the local water surface. Drives hull water-drag in
+    // and windage out as a wave buries the boat (submersion realism
+    // follow-up — previously nothing changed when the whole hull went
+    // under: windage kept blowing air on a hull that was now underwater,
+    // and there was no extra resistance for shoving a buried deck/cabin
+    // through water).
+    const deckWP = this._worldP.set(0, HULL.sheer, 0).applyQuaternion(this._q).add(this._pos);
+    const deckWaterH = this.ocean.getHeightAt(deckWP.x, deckWP.z);
+    this._hullSubmersion = THREE.MathUtils.clamp(deckWaterH - deckWP.y, 0, 1);
+
     // ---- 1. buoyancy + heave damping, per column -------------------------
     for (let i = 0; i < this.samples.length; i++) {
       const s = this.samples[i];
       const wp = this._worldP.copy(s.local).applyQuaternion(this._q).add(this._pos);
 
+      this.breakerCooldown[i] = Math.max(0, this.breakerCooldown[i] - dt);
+
       const waterH = this.ocean.getHeightAt(wp.x, wp.z);
       const depth = THREE.MathUtils.clamp(waterH - wp.y, 0, s.columnHeight);
       this.lastDepth[i] = depth;
-      if (depth <= 0) continue;
+      if (depth <= 0) {
+        this._wasWet[i] = 0;
+        continue;
+      }
 
       // Velocity of the hull at this point (v + ω × r), minus the water's
       // own analytic orbital velocity: the column damps RELATIVE motion.
@@ -334,7 +437,19 @@ export class BoatPhysics {
       }
 
       const areaEff = s.area * (1 + s.flare * Math.min(depth / 0.55, 1));
-      const fBuoy = RHO_WATER * G * areaEff * depth;
+
+      // Smith effect (finding #8): the wave-varying part of subsurface
+      // pressure decays with depth — using the full instantaneous crest
+      // height as hydrostatic-everywhere over-excites the hull in the
+      // short-wave band a 2.5 t hull should barely notice. Falls back to
+      // the plain surface height for ocean stand-ins that don't implement it
+      // (e.g. the flat-water test stub).
+      const effH = this.ocean.effectiveHeightAt
+        ? this.ocean.effectiveHeightAt(wp.x, wp.z, depth)
+        : waterH;
+      const pressureDepth = THREE.MathUtils.clamp(effH - wp.y, 0, s.columnHeight);
+      const fBuoy = RHO_WATER * G * areaEff * pressureDepth;
+
       // The quadratic heave term is sized for ~1 m/s relative motion. In a
       // violent short-crested sea (directionality δ→0, storm wind) a pyramid
       // peak can rise under the hull at 6-8 m/s; unclamped, the v² term then
@@ -345,33 +460,176 @@ export class BoatPhysics {
       const relVyD = THREE.MathUtils.clamp(relVy, -4, 4);
       const fDamp = -areaEff * (TUNING.heaveLin + TUNING.heaveQuad * Math.abs(relVyD)) * relVyD;
 
-      b.addForceAtPoint({ x: 0, y: fBuoy + fDamp, z: 0 }, wp, true);
+      // Added mass (finding #3): the hull must accelerate the water around
+      // it too — a reaction force opposing the RELATIVE VERTICAL
+      // ACCELERATION (not velocity), estimated by differencing relVyD across
+      // substeps. This is what stops the boat reacting to short chop like a
+      // cork; the swell still moves it (accel is small and slow there).
+      //
+      // Two safety nets against the finite difference "flying" the boat in
+      // steep/large seas (this DID happen without them — a fresh dry→wet
+      // transition or a relVyD swing across its ±4 clamp produces a huge,
+      // physically-meaningless spike; naive differencing is not guaranteed
+      // energy-conserving under clamping and repeated spikes in the same
+      // direction net-launch the hull over many substeps):
+      //   1. skip the accel term entirely on the FIRST wet substep after a
+      //      dry one — there is no valid "previous" sample to diff against.
+      //   2. bound the resulting force to a multiple of this column's own
+      //      buoyancy, so it can influence but never dominate/overpower the
+      //      force actually holding the boat up.
+      let fAddedMass = 0;
+      if (this._wasWet[i]) {
+        const relAccel = THREE.MathUtils.clamp((relVyD - this.prevRelVy[i]) / dt, -8, 8);
+        fAddedMass = THREE.MathUtils.clamp(
+          -RHO_WATER * TUNING.addedMassCa * areaEff * depth * relAccel,
+          -1.2 * fBuoy - 100,
+          1.2 * fBuoy + 100
+        );
+      }
+      this.prevRelVy[i] = relVyD;
+      this._wasWet[i] = 1;
+
+      // Buoyancy slope tilt (finding #2): hydrostatic force acts along the
+      // local pressure gradient, which tilts with the wave surface slope —
+      // this is the force that makes a boat surf down a wave face and shoves
+      // it sideways on a beam crest, instead of only ever bobbing straight
+      // up. Central-differenced from the ACTUAL (unattenuated) surface, same
+      // as what's rendered. Clamped: a folding crest can be locally
+      // near-vertical, and real water that steep is breaking, not surfable
+      // (see the breaker impulse below).
+      const GRAD_EPS = 1.0; // m
+      let slopeX =
+        (this.ocean.getHeightAt(wp.x + GRAD_EPS, wp.z) -
+          this.ocean.getHeightAt(wp.x - GRAD_EPS, wp.z)) /
+        (2 * GRAD_EPS);
+      let slopeZ =
+        (this.ocean.getHeightAt(wp.x, wp.z + GRAD_EPS) -
+          this.ocean.getHeightAt(wp.x, wp.z - GRAD_EPS)) /
+        (2 * GRAD_EPS);
+      const slopeMag = Math.hypot(slopeX, slopeZ);
+      const SLOPE_CLAMP = 0.35;
+      if (slopeMag > SLOPE_CLAMP) {
+        const sc = SLOPE_CLAMP / slopeMag;
+        slopeX *= sc;
+        slopeZ *= sc;
+      }
+
+      b.addForceAtPoint(
+        { x: -fBuoy * slopeX, y: fBuoy + fDamp + fAddedMass, z: -fBuoy * slopeZ },
+        wp,
+        true
+      );
+
+      // Breaking-wave impulse (finding #13): near the surface, a folding
+      // crest (Jacobian → 0) shoves the hull bodily along the wave's
+      // propagation direction — the mechanism behind real small-yacht
+      // capsizes in survival conditions, and previously entirely absent (the
+      // Jacobian breaking detector only drove foam/visuals). Approximates
+      // "phase speed" from the finest cascade (the scale that's actually
+      // folding here) and "propagation direction" from the local orbital
+      // velocity (which points along-crest at a breaking peak). Rate-limited
+      // per column so a persistently-folding patch doesn't fire every
+      // substep — the cooldown IS the "clamp total impulse per event".
+      if (this.breakerCooldown[i] <= 0 && depth < 0.5 && this.ocean.fft?.jacobianAt) {
+        const J = this.ocean.fft.jacobianAt(wp.x, wp.z);
+        const severity = Math.min(0.3 - J, 0.5);
+        if (severity > 0) {
+          const dirLen = Math.hypot(this._waterVel.x, this._waterVel.z);
+          if (dirLen > 0.1) {
+            const fine = this.ocean.fft.cascades[this.ocean.fft.cascades.length - 1];
+            const c = Math.sqrt(G / Math.max(fine.kMin, 0.05));
+            const mag = Math.min(RHO_WATER * 0.5 * severity * c * areaEff, 2500);
+            this._force
+              .set(this._waterVel.x / dirLen, 0, this._waterVel.z / dirLen)
+              .multiplyScalar(mag);
+            b.addForceAtPoint(this._force, wp, true);
+            this.breakerCooldown[i] = 0.12; // ~one chop-crest cadence
+          }
+        }
+      }
     }
 
     // ---- 2. forward hull drag (vs the water, not the world) ---------------
-    const fwd = this._axis.set(1, 0, 0).applyQuaternion(this._q);
+    const fwd = this._fwdAxis.set(1, 0, 0).applyQuaternion(this._q);
     const vFwd = this._vRel.copy(this._linvel).sub(this._waterVelC).dot(fwd);
     const speed = Math.abs(vFwd);
-    const froude = speed / Math.sqrt(G * HULL.length);
+    // Wave-making resistance is governed by WATERLINE length, not LOA — the
+    // bow/stern overhangs don't carry the hull's own wave (finding #7).
+    const froude = speed / Math.sqrt(G * HULL.lwl);
     const wmRamp = THREE.MathUtils.clamp(
       (froude - TUNING.waveMakingFnStart) / TUNING.waveMakingFnSpan,
       0,
       2.5 // let it keep climbing well past hull speed rather than plateau
     );
     const waveMakingQuad = TUNING.waveMakingCoeff * wmRamp * wmRamp * wmRamp;
-    const fFwd = -(TUNING.fwdLin + (TUNING.fwdQuad + waveMakingQuad) * speed) * vFwd;
+    // A heeled hull drags substantially more: asymmetric wetted shape, rail
+    // immersed, rudder dragged at an angle (finding #14).
+    const heelDragMult = 1 + 0.6 * sinHeel * sinHeel;
+    const fFwd =
+      -(TUNING.fwdLin + (TUNING.fwdQuad * heelDragMult + waveMakingQuad) * speed) * vFwd;
     this._force.copy(fwd).multiplyScalar(fFwd);
     b.addForce(this._force, true);
 
-    // ---- 3. keel lateral drag (at the keel's centre of effort) ------------
+    // ---- 3. keel: lifting foil + residual damping (finding #1) ------------
+    // A real keel is a lifting foil: side force scales with forward speed²
+    // × leeway angle, not lateral speed² alone (the old pure-damping model),
+    // so it stays powerful at cruise speed and goes slack near a stop —
+    // exactly backwards from the old law.
     const keelWP = this._worldP.copy(TUNING.keelCenter).applyQuaternion(this._q).add(this._pos);
     this._r.copy(keelWP).sub(this._pos);
     this._vPoint.copy(this._angvel).cross(this._r).add(this._linvel).sub(this._waterVelC);
     const lat = this._axis.set(0, 0, 1).applyQuaternion(this._q);
     const vLat = this._vPoint.dot(lat);
-    const fLat = -(TUNING.latLin + TUNING.latQuad * Math.abs(vLat)) * vLat;
-    this._force.copy(lat).multiplyScalar(fLat);
+    const vFwdKeel = this._vPoint.dot(fwd);
+    const U2keel = vFwdKeel * vFwdKeel + vLat * vLat;
+    const Ukeel = Math.sqrt(U2keel);
+
+    this._force.set(0, 0, 0);
+    if (Ukeel > 0.05) {
+      // Leeway angle off the keel chord (fore-aft): the boat's own velocity
+      // relative to water, NOT negated — positive vLat (drifting to
+      // starboard) is a positive β.
+      const beta = THREE.MathUtils.clamp(
+        Math.atan2(vLat, Math.abs(vFwdKeel)),
+        -Math.PI / 4,
+        Math.PI / 4
+      );
+      const CL = foilCL(beta, TUNING.keelCLalpha, THREE.MathUtils.degToRad(TUNING.keelStallDeg));
+      const CDi = (CL * CL) / (Math.PI * TUNING.keelAR);
+      const q = 0.5 * RHO_WATER * TUNING.keelArea * U2keel;
+      // Flow direction (unit, body XZ) arriving at the foil — same
+      // "flow = −relative velocity" convention the rudder uses below.
+      const flowFwd = -vFwdKeel / Ukeel;
+      const flowLat = -vLat / Ukeel;
+      const liftFwd = -flowLat;
+      const liftLat = flowFwd;
+      const Flift = q * CL;
+      const Fdrag = q * (TUNING.keelCD0 + CDi);
+      this._force.addScaledVector(fwd, liftFwd * Flift + flowFwd * Fdrag);
+      this._force.addScaledVector(lat, liftLat * Flift + flowLat * Fdrag);
+    }
+    // Residual damping (see the TUNING.latLin/latQuad comment) — keeps
+    // near-zero-speed leeway from being frictionless and stands in for hull
+    // sideways drag the foil model above doesn't cover.
+    this._force.addScaledVector(lat, -(TUNING.latLin + TUNING.latQuad * Math.abs(vLat)) * vLat);
     b.addForceAtPoint(this._force, keelWP, true);
+
+    // ---- 3b. hull water drag when awash ------------------------------------
+    // A wave burying the deck doesn't just stop windage from having anything
+    // to push on (finding #11's fade) — the deck/cabin/topsides now drag
+    // through WATER like any bluff body, ~800× the resistance of the air
+    // that was there a moment ago. Applied at the CoM (approximate — this is
+    // a coarse "how buried is the boat" correction, not a per-panel model).
+    if (this._hullSubmersion > 0.02) {
+      this._vRel.copy(this._linvel).sub(this._waterVelC);
+      const relSpeed = this._vRel.length();
+      if (relSpeed > 0.05) {
+        const areaWet = TUNING.hullAwashArea * this._hullSubmersion;
+        const dragMag = 0.5 * RHO_WATER * TUNING.hullAwashCd * areaWet * relSpeed;
+        this._force.copy(this._vRel).multiplyScalar(-dragMag);
+        b.addForce(this._force, true);
+      }
+    }
 
     // ---- 4. sails + rudder (Phase 3) --------------------------------------
     if (this.wind) {
@@ -404,11 +662,11 @@ export class BoatPhysics {
     // ---- 5. rotational damping (body frame) -------------------------------
     // ω in body frame: roll about X, yaw about Y, pitch about Z.
     const wBody = this._torque.copy(this._angvel).applyQuaternion(this._invQ);
-    wBody.set(
-      -TUNING.rollDamp * wBody.x,
-      -TUNING.yawDamp * wBody.y,
-      -TUNING.pitchDamp * wBody.z
-    );
+    // Roll damping is dominated by quadratic vortex shedding off the keel
+    // and bilges, not one linear rate (finding #10): small rolls (a boat
+    // rocking at anchor) are lightly damped, big storm rolls heavily damped.
+    const rollTorque = -(TUNING.rollDampLin + TUNING.rollDampQuad * Math.abs(wBody.x)) * wBody.x;
+    wBody.set(rollTorque, -TUNING.yawDamp * wBody.y, -TUNING.pitchDamp * wBody.z);
     wBody.applyQuaternion(this._q); // back to world
     b.addTorque(wBody, true);
   }
@@ -427,11 +685,33 @@ export class BoatPhysics {
     // (Wind gradient with height ignored for now.)
     this._aw.copy(this.wind.getWindVector()).sub(this._linvel);
 
+    // Heeling de-powers the rig (projected area shrinks) and swings the rig
+    // itself into the wind's path (the mast windage term just below).
+    const stbdY = this._axis.set(0, 0, 1).applyQuaternion(this._q).y;
+    const sinHeel = Math.abs(stbdY);
+    const cosHeel = Math.sqrt(Math.max(1 - stbdY * stbdY, 0.05));
+
     // Hull/rig windage — plain air drag at deck level, independent of sail
     // trim. A boat with flogging sails still gets blown downwind.
     const awH = Math.hypot(this._aw.x, this._aw.z);
     if (awH > 0.1) {
-      const f = 0.5 * RHO_AIR * TUNING.windageCd * TUNING.windageArea * awH;
+      // Bow-on frontal area is much less than beam-on broadside area
+      // (finding #11): scale windageArea by how square-on the wind is to
+      // the boat. Computed directly from the world-frame wind/heading angle
+      // — the body-frame AWA isn't resolved until after the sail loop below.
+      const fwdW = this._fwdAxis; // set this substep in applyForces' section 2
+      const fwdXZ = Math.hypot(fwdW.x, fwdW.z) || 1;
+      const sinAWA = Math.abs((this._aw.x * fwdW.z - this._aw.z * fwdW.x) / (awH * fwdXZ));
+      const hullArea = TUNING.windageArea * (0.45 + 0.55 * sinAWA);
+      // A knocked-down rig adds huge presented area: the mast/rigging swing
+      // from edge-on (upright) to broadside-on (heeled over) as sinHeel
+      // grows — why a boat lying a-hull under bare poles still drifts fast.
+      const mastArea = TUNING.windageMastArea * sinHeel;
+      // Fade to zero as the hull goes under (submersion realism follow-up):
+      // a buried deck has no exposed area left for the wind to push on —
+      // the hull water-drag term (applyForces §3b) takes over instead.
+      const exposedFrac = 1 - this._hullSubmersion;
+      const f = 0.5 * RHO_AIR * TUNING.windageCd * (hullArea + mastArea) * exposedFrac * awH;
       this._force.set(this._aw.x * f, 0, this._aw.z * f);
       const deckWP = this._worldP
         .copy(TUNING.windageCenter)
@@ -455,10 +735,6 @@ export class BoatPhysics {
     }
     aero.awaDeg = THREE.MathUtils.radToDeg(Math.atan2(-this._aw.z / aws, -this._aw.x / aws));
 
-    // Heeling de-powers the rig (projected area shrinks).
-    const stbdY = this._axis.set(0, 0, 1).applyQuaternion(this._q).y;
-    const cosHeel = Math.sqrt(Math.max(1 - stbdY * stbdY, 0.05));
-
     // True wind, world frame — re-scaled per sail below by height (wind
     // shear), so captured once here rather than inside the loop.
     const trueWindWorld = this.wind.getWindVector();
@@ -466,6 +742,31 @@ export class BoatPhysics {
     const trueWindZ = trueWindWorld.z;
 
     for (const sail of SAILS) {
+      // Hoisted fraction: scales the area, and lowers the centre of effort
+      // (a reefed main loses its TOP, which is exactly why reefing tames
+      // heel far more than the area reduction alone suggests).
+      const hoist = this.sailPlan[sail.name] ?? 1;
+      if (hoist < 0.02) {
+        if (sail.name === 'main') {
+          aero.mainBetaDeg = 0;
+          aero.mainAlphaDeg = 0;
+          aero.luffing = false;
+        } else {
+          aero.jibBetaDeg = 0;
+        }
+        continue;
+      }
+
+      // Live cloth centre of pressure, when fresh — resolved up front
+      // because the wind-shear step just below needs its WORLD-frame
+      // height (finding #12).
+      const cloth =
+        this.clothCouplingEnabled && this._cloth.age < 0.25 ? this._cloth[sail.name] : null;
+      const ceWorld = cloth
+        ? this._worldP.copy(cloth.cp)
+        : this._worldP.set(sail.ce.x, sail.ce.y * (0.35 + 0.65 * hoist), sail.ce.z);
+      ceWorld.applyQuaternion(this._q).add(this._pos);
+
       // Wind shear: real wind speed grows with height above the sea
       // (roughly a power law over open water), so the masthead genuinely
       // sees more breeze than the boom — real sails are cut with "twist"
@@ -474,8 +775,12 @@ export class BoatPhysics {
       // the actual DRIVE force each sail's polar solve uses), referenced to
       // the standard 10 m meteorological height so wind.speedKnots means
       // what it always meant. Exponent 0.12 is a typical open-water value
-      // (rougher terrain runs higher, ~0.14-0.4).
-      const heightAboveSea = Math.max(sail.ce.y, 0.5);
+      // (rougher terrain runs higher, ~0.14-0.4). Uses the CE's WORLD-frame
+      // height (finding #12): a boat heeled 45° has its masthead measurably
+      // lower in the real wind gradient — real sailors exploit exactly this
+      // ("heeled boats feel less wind aloft") — which the old body-frame
+      // sail.ce.y ignored entirely.
+      const heightAboveSea = Math.max(ceWorld.y, 0.5);
       const shear = Math.pow(heightAboveSea / 10, 0.12);
       this._awSail.set(trueWindX * shear, 0, trueWindZ * shear).sub(this._linvel);
       this._awSail.applyQuaternion(this._invQ);
@@ -495,31 +800,36 @@ export class BoatPhysics {
       const s = Math.sin(th);
       const liftX = flowXs * c - flowZs * s;
       const liftZ = flowXs * s + flowZs * c;
-      // Hoisted fraction: scales the area, and lowers the centre of effort
-      // (a reefed main loses its TOP, which is exactly why reefing tames
-      // heel far more than the area reduction alone suggests).
-      const hoist = this.sailPlan[sail.name] ?? 1;
-      if (hoist < 0.02) {
-        if (sail.name === 'main') {
-          aero.mainBetaDeg = 0;
-          aero.mainAlphaDeg = 0;
-          aero.luffing = false;
-        } else {
-          aero.jibBetaDeg = 0;
-        }
-        continue;
-      }
+
+      // Auto-trim target angle of attack (finding #4): 26° is CL-max, the
+      // right target on a reach where lift points mostly forward — but
+      // close-hauled, lift points mostly SIDEWAYS, so what matters is
+      // drive-to-heel and lift-to-drag, both of which peak much lower
+      // (≈13° for a soft rig). Sheeting to CL-max upwind is the classic
+      // "sheeted in hard and going sideways" beginner error, here
+      // institutionalised in the old fixed-α trimmer. Also eases further as
+      // heel builds past ~25° — how a real trimmer de-powers a gust, giving
+      // correct gust response for free (gust → heel builds → auto-ease →
+      // boat stands up) instead of translating gusts straight into
+      // knockdown.
+      const alphaTarget =
+        THREE.MathUtils.lerp(13, 26, THREE.MathUtils.smoothstep(absAwa, 35, 90)) -
+        5 * THREE.MathUtils.smoothstep(sinHeel, 0.42, 0.7); // ~25°→45° heel
 
       // Sheet geometry: the boom weathervanes out to the sheet limit but
-      // can never be pushed windward of the apparent wind (it would flog).
+      // can never be pushed far windward of the apparent wind (it would
+      // flog) — eased 4° past dead-on-the-wind for camber (finding #5): a
+      // cambered sail doesn't luff until the flow attacks the LEE side, not
+      // at literal zero incidence, so alpha is allowed to go slightly
+      // negative before sailCL cuts it to zero.
       const betaMax = this.helm.autoTrim
-        ? THREE.MathUtils.clamp(absAwa - ALPHA_OPT_DEG, SHEET_MIN_DEG, SHEET_MAX_DEG)
+        ? THREE.MathUtils.clamp(absAwa - alphaTarget, SHEET_MIN_DEG, SHEET_MAX_DEG)
         : THREE.MathUtils.clamp(
             this.helm.sheetMaxDeg * sail.sheetFactor,
             SHEET_MIN_DEG,
             SHEET_MAX_DEG
           );
-      const beta = Math.min(betaMax, absAwa);
+      const beta = Math.min(betaMax, absAwa + 4);
       const alpha = absAwa - beta;
 
       // Past ~60° of heel the rig stops being a wing: flow separates off the
@@ -527,16 +837,10 @@ export class BoatPhysics {
       // canvas is on the water. cosHeel alone bottoms out at 22% — at storm
       // apparent winds (force ∝ v²) that residual still dragged a capsized
       // boat through the sea like a kite. Smoothly kill drive across 60→85°.
-      const sinHeel = Math.abs(stbdY);
       const knockdown = 1 - THREE.MathUtils.smoothstep(sinHeel, 0.87, 0.996);
       const q = 0.5 * RHO_AIR * awsS * awsS * sail.area * hoist * cosHeel * knockdown;
       const L = q * sailCL(alpha);
       const D = q * sailCD(alpha);
-
-      const cloth =
-        this.clothCouplingEnabled && this._cloth.age < 0.25
-          ? this._cloth[sail.name]
-          : null;
 
       this._force.set(liftX * L + flowXs * D, 0, liftZ * L + flowZs * D);
       // Luffing/flogging: polars say ~zero, the cloth knows better — blend
@@ -547,15 +851,24 @@ export class BoatPhysics {
       }
       this._force.applyQuaternion(this._q);
 
-      // Application point: live cloth centre of pressure when available.
-      const ceWorld = cloth
-        ? this._worldP.copy(cloth.cp)
-        : this._worldP.set(sail.ce.x, sail.ce.y * (0.35 + 0.65 * hoist), sail.ce.z);
-      ceWorld.applyQuaternion(this._q).add(this._pos);
       // A sail whose centre of effort is UNDER the sea surface is not flying
-      // in air — it is a sea anchor. Kill the aero force; the hull columns
-      // and rotational damping already model the water's grip on the boat.
-      if (ceWorld.y < this.ocean.getHeightAt(ceWorld.x, ceWorld.z)) continue;
+      // in air — it is wet cloth dragged through water (submersion realism
+      // follow-up: this used to just vanish the force, silently, entirely —
+      // now it's a real drag term against the local relative flow, same
+      // physical picture as ClothSail.js's own submerged-particle drag,
+      // just felt by the rigid body instead of only the visual mesh).
+      if (ceWorld.y < this.ocean.getHeightAt(ceWorld.x, ceWorld.z)) {
+        this._waterVelocityAt(ceWorld.x, ceWorld.z, this._waterVel);
+        this._r.copy(ceWorld).sub(this._pos);
+        this._vPoint.copy(this._angvel).cross(this._r).add(this._linvel).sub(this._waterVel);
+        const relSpeed = this._vPoint.length();
+        if (relSpeed > 0.05) {
+          const dragMag = 0.5 * RHO_WATER * TUNING.sailWaterCd * sail.area * hoist * relSpeed;
+          this._force.copy(this._vPoint).multiplyScalar(-dragMag);
+          this.body.addForceAtPoint(this._force, ceWorld, true);
+        }
+        continue;
+      }
       this.body.addForceAtPoint(this._force, ceWorld, true);
 
       if (sail.name === 'main') {
@@ -569,10 +882,12 @@ export class BoatPhysics {
   }
 
   /**
-   * The rudder is a lifting foil in the local water flow. Force scales with
-   * flow speed SQUARED → no boat speed, no steering. Because the flow used
-   * is the blade's own velocity (v + ω×r), the rudder also naturally damps
-   * yaw and weathervanes the stern into any leeway.
+   * The rudder is a lifting foil in the local water flow (finding #6): it
+   * STALLS like the keel does, instead of being strongest at 45° (the old
+   * CL·sin(2α) law). Force scales with flow speed SQUARED → no boat speed,
+   * no steering. Because the flow used is the blade's own velocity
+   * (v + ω×r), the rudder also naturally damps yaw and weathervanes the
+   * stern into any leeway.
    */
   _applyRudderForce() {
     const wp = this._worldP
@@ -592,12 +907,32 @@ export class BoatPhysics {
     const rudderRad = THREE.MathUtils.degToRad(
       THREE.MathUtils.clamp(this.helm.rudderDeg, -TUNING.rudderMaxDeg, TUNING.rudderMaxDeg)
     );
-    const alphaR = THREE.MathUtils.clamp(rudderRad - gamma, -Math.PI / 4, Math.PI / 4);
+    const alphaR = THREE.MathUtils.clamp(rudderRad - gamma, -Math.PI / 2, Math.PI / 2);
 
-    // Side force in body +Z; sign: +rudder → stern pushed to port → bow
-    // yaws to STARBOARD (verified in the headless sailing test).
-    const F = -0.5 * RHO_WATER * TUNING.rudderArea * TUNING.rudderCL * Math.sin(2 * alphaR) * U * U;
-    this._force.set(0, 0, F).applyQuaternion(this._q);
+    const CL = foilCL(alphaR, TUNING.rudderCLalpha, THREE.MathUtils.degToRad(TUNING.rudderStallDeg));
+    const CDi = (CL * CL) / (Math.PI * TUNING.rudderAR);
+    const q = 0.5 * RHO_WATER * TUNING.rudderArea * U * U;
+
+    // Ventilation: as heel exceeds ~40° the blade nears the surface and
+    // starts drawing air, losing bite. Pairs with the buoyancy slope force
+    // (finding #2) to produce honest broaches instead of a rudder that
+    // keeps steering a boat flat on its ear.
+    const stbdY = this._axis.set(0, 0, 1).applyQuaternion(this._q).y;
+    const heelFade = 1 - THREE.MathUtils.smoothstep(Math.abs(stbdY), 0.64, 0.9); // ~40°→64°
+
+    // Lift ⟂ flow, drag ‖ flow, both in the body XZ plane. Flow direction is
+    // (this._aw.x, this._aw.z)/U (already the "flow = −relative velocity"
+    // convention above); rotate -90° for lift so a positive CL at positive
+    // alphaR pushes the stern to port, matching the old sign convention
+    // (verified: +rudder → stern to port → bow yaws to STARBOARD).
+    const flowX = this._aw.x / U;
+    const flowZ = this._aw.z / U;
+    const liftX = -flowZ;
+    const liftZ = flowX;
+    const Flift = q * CL * heelFade;
+    const Fdrag = q * (TUNING.rudderCD0 + CDi) * heelFade;
+    this._force.set(liftX * Flift + flowX * Fdrag, 0, liftZ * Flift + flowZ * Fdrag);
+    this._force.applyQuaternion(this._q);
     this.body.addForceAtPoint(this._force, wp, true);
   }
 

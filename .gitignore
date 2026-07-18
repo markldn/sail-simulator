@@ -9,3 +9,6 @@ screenshots/
 capture-screenshots.cjs
 done.md
 TODO.md
+PHYSICS-REVIEW.md
+PHYSICS-FIXES-REPORT.md
+.claude/

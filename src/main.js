@@ -369,6 +369,12 @@ async function init() {
   renderer.domElement.addEventListener(
     'pointerdown',
     (e) => {
+      // Always resume audio on the raw gesture — grabbing a rope below calls
+      // stopImmediatePropagation() and would otherwise swallow this event
+      // before it bubbles to the window listener that starts the AudioContext.
+      // On mobile this WAS the sound bug: the boat fills most of the screen,
+      // so a first tap very often lands on a rope and audio never started.
+      startAudio();
       if (rig.tryGrab(e)) {
         e.stopImmediatePropagation();
         return;
@@ -493,8 +499,14 @@ async function init() {
     const awash = awashN / S.length; // fraction of the hull awash
     const railDown = Math.max(0, (Math.abs(boatState.heel) - 22) / 45); // rail in the water
     deckWet = Math.min(1, deckWet + (awash * 3.5 + railDown * 2.0) * frameDt);
-    deckWet = Math.max(0, deckWet - frameDt * 0.28); // ~3.5 s to dry
+    // ~7 s to dry (was ~3.5 s) — water washing the deck used to read as
+    // "instantly dry" the moment the wave passed, because the falling
+    // Runoff droplets are the only visible cue and they're sparse. Slower
+    // decay plus the wet-material look below (Boat.setWetness) gives a
+    // just-washed deck real, visible persistence.
+    deckWet = Math.max(0, deckWet - frameDt * 0.14);
     runoff.update(frameDt, boatState, boatVel, deckWet);
+    boat.setWetness(deckWet);
 
     // Rain: fades in from ~gale (25 kn) to storm (50 kn), slanted by the
     // wind — plus the squall burst a lightning strike dumps for ~15 s.

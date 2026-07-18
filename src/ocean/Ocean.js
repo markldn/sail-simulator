@@ -31,6 +31,16 @@ import { FFTOcean } from './FFTWaves.js';
 
 const SEA_BUILD_TAU = 5; // s — e-folding time for height/chop to respond
 const SEA_ROT_RATE = THREE.MathUtils.degToRad(6); // rad/s max direction swing
+// Finding #9: a real sea takes HOURS to build and longer to decay, and
+// swell direction lags wind shifts — none of which a single 5 s time
+// constant can represent. The swell CASCADE (index 0 of FFTOcean.cascades,
+// the 720 m band — NOT the tsunami/rogue "event wave" slot below) gets its
+// own much slower, asymmetric lag while the chop cascades keep the fast
+// response above. Compressed "hours" so it's still playable: ~180 s to
+// build, 3× that to decay (real seas decay slower than they build).
+const SEA_LAG_BUILD_TAU = 180; // s
+const SEA_LAG_DECAY_MULT = 3;
+const SEA_LAG_ROT_RATE = THREE.MathUtils.degToRad(1.2); // rad/s, slower than chop's swing
 // Event-wave amplitude ramp (m/s). The wave BUILDS to its target height
 // instead of materialising at full size: an 8 m crest appearing instantly
 // on top of the hull submerged every buoyancy column metres deep in one
@@ -685,6 +695,11 @@ export class Ocean {
     this._seaWindMs = 9;
     this._lastRebuildWind = 9;
     this._lastRebuildDir = 0;
+    // Swell-cascade lag state (finding #9) — see SEA_LAG_* above.
+    this._seaWindMsSwell = 9;
+    this._seaDirSwell = 0;
+    this._lastRebuildWindSwell = 9;
+    this._lastRebuildDirSwell = 0;
     const cascades = this.fft.cascades;
     const makeTex = (data, N) => {
       const t = new THREE.DataTexture(data, N, N, THREE.RGBAFormat, THREE.HalfFloatType);
@@ -832,6 +847,21 @@ export class Ocean {
    */
   getHeightAt(x, z) {
     let h = this.fft.heightAt(x, z);
+    const s = this._swellSlot;
+    if (s.amplitude > 0.0001) {
+      h += s.amplitude * Math.sin(s.k * (s.dirX * x + s.dirZ * z) - s.omega * this.time + s.phase);
+    }
+    return h;
+  }
+
+  /**
+   * Water height as felt by hydrostatic PRESSURE `submergence` metres below
+   * the surface (the Smith effect — see FFTOcean.effectiveHeightAt). Used
+   * only for the buoyancy force; getHeightAt above remains the "what's
+   * actually drawn" query for rendering, spray and wetness checks.
+   */
+  effectiveHeightAt(x, z, submergence) {
+    let h = this.fft.effectiveHeightAt(x, z, submergence);
     const s = this._swellSlot;
     if (s.amplitude > 0.0001) {
       h += s.amplitude * Math.sin(s.k * (s.dirX * x + s.dirZ * z) - s.omega * this.time + s.phase);
@@ -1036,6 +1066,11 @@ export class Ocean {
     this._seaWindMs = Math.min(wind.speedKnots * 0.514444, 22);
     this._lastRebuildWind = this._seaWindMs;
     this._lastRebuildDir = this.waveRot;
+    // No lag anywhere on a snap, including the swell cascade.
+    this._seaWindMsSwell = this._seaWindMs;
+    this._seaDirSwell = this.waveRot;
+    this._lastRebuildWindSwell = this._seaWindMsSwell;
+    this._lastRebuildDirSwell = this._seaDirSwell;
     this.fft.setWind(this._seaWindMs, this.waveRot);
   }
 
@@ -1077,15 +1112,38 @@ export class Ocean {
       this.waveRot += THREE.MathUtils.clamp(diff, -SEA_ROT_RATE * dt, SEA_ROT_RATE * dt);
       this.uniforms.uWaveRot.value = this.waveRot;
 
+      // Swell cascade (finding #9): much slower, asymmetric build/decay —
+      // a fresh gale takes real time to raise a proper sea, and a dropped
+      // wind leaves a big rolling leftover swell instead of snapping flat.
+      // Direction lags even harder (real swell keeps arriving from its old
+      // direction for a while after the wind backs or veers).
+      const swellRising = targetWind > this._seaWindMsSwell;
+      const tauSwell = swellRising ? SEA_LAG_BUILD_TAU : SEA_LAG_BUILD_TAU * SEA_LAG_DECAY_MULT;
+      const kSwell = 1 - Math.exp(-dt / tauSwell);
+      this._seaWindMsSwell = THREE.MathUtils.lerp(this._seaWindMsSwell, targetWind, kSwell);
+      const diffSwell = Math.atan2(
+        Math.sin(target - this._seaDirSwell),
+        Math.cos(target - this._seaDirSwell)
+      );
+      this._seaDirSwell += THREE.MathUtils.clamp(
+        diffSwell,
+        -SEA_LAG_ROT_RATE * dt,
+        SEA_LAG_ROT_RATE * dt
+      );
+
       // Rebuilding the spectrum costs ~1–2 ms, so only do it once it has
       // drifted enough (the field morphs smoothly — phases are preserved).
       if (
         Math.abs(this._seaWindMs - this._lastRebuildWind) > 0.15 ||
-        Math.abs(this.waveRot - this._lastRebuildDir) > 0.03
+        Math.abs(this.waveRot - this._lastRebuildDir) > 0.03 ||
+        Math.abs(this._seaWindMsSwell - this._lastRebuildWindSwell) > 0.15 ||
+        Math.abs(this._seaDirSwell - this._lastRebuildDirSwell) > 0.03
       ) {
-        this.fft.setWind(this._seaWindMs, this.waveRot);
+        this.fft.setWindSplit(this._seaWindMsSwell, this._seaDirSwell, this._seaWindMs, this.waveRot);
         this._lastRebuildWind = this._seaWindMs;
         this._lastRebuildDir = this.waveRot;
+        this._lastRebuildWindSwell = this._seaWindMsSwell;
+        this._lastRebuildDirSwell = this._seaDirSwell;
       }
     }
 

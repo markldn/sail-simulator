@@ -6,8 +6,6 @@ wave spectra, a sailing hull with sampled-column buoyancy and cloth sails, and
 a physically-based sky with dynamic weather — all running in real time in the
 browser, no install or asset downloads required.
 
-> Private repository.
-
 ---
 
 ## Features
@@ -21,6 +19,7 @@ browser, no install or asset downloads required.
 - **First-person helm** — walk the deck and drag the rigging to trim the sails.
 - **Reflections** — the boat and sky mirror in the water.
 - **Scenarios** — one-click presets from calm dawn to hurricane and rogue wave.
+- **Mobile friendly** — touch controls (rudder joystick, sheet buttons) appear automatically on phones and tablets.
 
 ---
 
@@ -45,6 +44,15 @@ browser, no install or asset downloads required.
 
 A live control panel (top-right) exposes wind, sun, sky, sail, and scenario
 controls, plus debug visualisations.
+
+### Touch (phone / tablet)
+
+On any touch device, on-screen controls replace the keyboard automatically:
+
+- **Rudder joystick** (bottom-left) — drag left/right; it's proportional and
+  springs back to centre on release, like a real tiller.
+- **Sheet buttons** (bottom-right) — tap and hold to sheet in / ease out.
+- **Drag the rigging** directly (mainsheet, jib sheets, halyard) to trim by hand.
 
 ---
 
@@ -89,3 +97,9 @@ src/
 - [@dimforge/rapier3d-compat](https://rapier.rs/) — rigid-body physics (WASM)
 - [Vite](https://vitejs.dev/) — dev server & bundler
 - [lil-gui](https://lil-gui.georgealways.com/) — debug/control panel
+
+---
+
+## License
+
+[MIT](LICENSE)

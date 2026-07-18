@@ -18,6 +18,10 @@
 
 export const HULL = {
   length: 7.4, // LOA, metres
+  // Wave-making resistance depends on WATERLINE length, not LOA — the bow/
+  // stern overhangs don't carry the hull's own wave. With this hull's raked
+  // stem and transom, LWL runs a bit under LOA.
+  lwl: 6.4, // metres
   beam: 2.48, // max beam
   sheer: 0.62, // deck edge above DWL (freeboard, roughly constant)
   bottom: 0.52, // max canoe-body depth below DWL (excl. keel fin)
