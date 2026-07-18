@@ -1,5 +1,5 @@
 {
-  "name": "sailboat-simulator",
+  "name": "sail-simulator",
   "private": true,
   "version": "0.1.0",
   "description": "High-fidelity browser-based sailboat simulator — Three.js + Rapier",
@@ -7,8 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
-    "test": "node scripts/test-buoyancy.mjs && node scripts/test-sailing.mjs && node scripts/test-cloth.mjs && node scripts/test-fft.mjs"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",

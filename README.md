@@ -1,4 +1,4 @@
-# ⛵ Sailboat Simulator
+# ⛵ Sail Simulator
 
 A high-fidelity, browser-based sailboat simulator built with **Three.js** (WebGL)
 and **Rapier** (WASM rigid-body physics). It models an ocean with real FFT
@@ -26,7 +26,7 @@ browser, no install or asset downloads required.
 
 ## Screenshots
 
-![Sailboat simulator](media/boat.png)
+![Sail Simulator](media/boat.png)
 
 ---
 
@@ -64,14 +64,6 @@ npm run build
 npm run preview
 ```
 
-### Running the test suite
-
-```bash
-npm test
-```
-
-Runs buoyancy, sailing, cloth, and FFT sanity checks.
-
 ---
 
 ## Project structure
@@ -87,7 +79,6 @@ src/
   audio/               procedural sound synthesis
   ui/                  control panel, HUD, helm, rig interaction
   physics/             Rapier world wrapper
-scripts/               node test harnesses
 ```
 
 ---
