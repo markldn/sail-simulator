@@ -105,7 +105,13 @@ export function makeSailclothTexture() {
  */
 export function makeHullTexture() {
   const span = HULL.sheer + HULL.bottom;
-  const vWater = HULL.bottom / span; // v of y=0 (design waterline)
+  // Painted to the MEASURED flat-water equilibrium, not the y=0 design DWL:
+  // the physics floats the hull with its waterline at local y ≈ −0.105 m
+  // (measured by settling the rigid body on flat water), so paint keyed to
+  // y=0 left the whole antifoul band and boot-top riding proud of the sea —
+  // the "black line above the water" look. Antifoul must live underwater.
+  const FLOAT_Y = -0.105;
+  const vWater = (HULL.bottom + FLOAT_Y) / span;
   const tex = canvasTexture(64, 1024, (ctx, w, h) => {
     const rand = rng(777);
     const yOf = (v) => Math.round((1 - v) * h); // canvas y grows downward

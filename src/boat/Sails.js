@@ -151,6 +151,57 @@ export class Sails {
     this._b = new THREE.Vector3();
     this._c = new THREE.Vector3();
     this._f = new THREE.Vector3();
+    this._sailNormal = new THREE.Vector3();
+    this._scratchColor = new THREE.Color();
+  }
+
+  /**
+   * Real sailcloth is thin enough to transmit a real fraction of the light
+   * hitting its far side — the well-known "sails glowing amber in the sun"
+   * look. A plain opaque MeshStandardMaterial has no such term, so a
+   * backlit sail (very common: any time the sun sits behind or beside the
+   * boat from the camera's side) went essentially unlit — no direct sun on
+   * the visible face, and only whatever the environment map's diffuse
+   * irradiance contributes from that side, which for a large, near-planar
+   * surface can be small enough to read as flat black.
+   *
+   * Faked here as emissive rather than true material.transmission: real
+   * transmission needs three's screen-space refraction pass (a background
+   * capture + extra render), real cost and complexity for a thin, mostly-
+   * flat cloth where the visual effect (existing light source shining
+   * through) is what matters, not actual refraction. Uses the mesh's OWN
+   * computed normal (ClothSail.getRepresentativeNormal) rather than a
+   * hand-derived formula from boom angle — less to get wrong.
+   *
+   * The floor term is deliberately NOT scaled by sunColor: sunColor itself
+   * dims at low sun elevation (the smoothstep in SkySystem.setSun()) —
+   * exactly when strong backlighting/silhouettes are most common (dusk),
+   * so tying the floor to it would weaken the fix precisely when it's
+   * needed most. It's also picked to survive renderer.toneMappingExposure
+   * (0.5, applied as a linear pre-multiply before the ACES curve) and
+   * ACES's toe, which crushes small values hard: an earlier floor of 0.05
+   * × sunColor(~0.7) × exposure(0.5) ≈ 0.018 landed deep enough in the toe
+   * to still read as pure black despite genuinely adding light — confirmed
+   * by the user still seeing a flat-black silhouette after that fix shipped.
+   *
+   * @param {THREE.Vector3} sunDirWorld  direction TOWARDS the sun
+   * @param {THREE.Color}   sunColor
+   * @param {THREE.Quaternion} hullQuaternion
+   */
+  _applyBacklight(sunDirWorld, sunColor, hullQuaternion) {
+    const TRANSLUCENCY = 0.75; // fraction of sun color that shows through when fully backlit
+    const FLOOR_COLOR = new THREE.Color(0.55, 0.6, 0.68); // cool sky-bounce tint
+    const FLOOR_MAG = 0.35; // raw (pre-exposure) magnitude — see note above
+    const apply = (cloth, mat) => {
+      if (!cloth.mesh.visible) return;
+      cloth.getRepresentativeNormal(this._sailNormal).applyQuaternion(hullQuaternion);
+      const backlit = -this._sailNormal.dot(sunDirWorld); // >0 when facing away from the sun
+      mat.emissive.copy(FLOOR_COLOR).multiplyScalar(FLOOR_MAG);
+      this._scratchColor.copy(sunColor).multiplyScalar(TRANSLUCENCY * THREE.MathUtils.clamp(backlit, 0, 1));
+      mat.emissive.add(this._scratchColor);
+    };
+    apply(this.main, this.mainMat);
+    apply(this.jib, this.jibMat);
   }
 
   /**
@@ -194,8 +245,10 @@ export class Sails {
    * @param {number} time  simulation clock
    * @param {number} dt    frame delta
    * @param {{main:number, jib:number}} plan hoisted fraction per sail
+   * @param {{dirWorld:THREE.Vector3, color:THREE.Color, quaternion:THREE.Quaternion}} [sunState]
+   *   world sun direction/color + hull orientation, for the backlit-glow fake (omit to skip it)
    */
-  update(aero, time, dt, plan = { main: 1, jib: 1 }) {
+  update(aero, time, dt, plan = { main: 1, jib: 1 }, sunState = null) {
     if (Math.abs(aero.awaDeg) > 1) this._side = aero.awaDeg >= 0 ? 1 : -1;
     const side = this._side;
     const hoist = Math.max(plan.main, 0.05);
@@ -274,6 +327,7 @@ export class Sails {
     }
     if (this.main.mesh.visible) this.main.commit();
     if (this.jib.mesh.visible) this.jib.commit();
+    if (sunState) this._applyBacklight(sunState.dirWorld, sunState.color, sunState.quaternion);
 
     // Smooth force + CP and hand them to the physics (low-pass so cloth
     // flutter enlivens the readouts without shaking the rigid body).

@@ -18,22 +18,46 @@ import { HULL, halfBreadth, stationX } from '../boat/HullSpec.js';
 const MAX_DROPS = 500;
 const LIFE_SECONDS = 1.5;
 
+// Same streaked-capsule droplet rendering as Spray.js (see the rationale
+// there): motion-stretched, per-drop sized, size-capped, near-camera faded.
+// Falling drips get their vertical motion blur from the velocity stretch.
 const VERT = /* glsl */ `
   attribute float aLife;
+  attribute float aSeed;
+  attribute vec3  aVel;
   varying float vLife;
+  varying float vSeed;
+  varying float vNear;
+  varying vec2  vDir;
+  varying float vHalf;
   void main() {
     vLife = aLife;
+    vSeed = aSeed;
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = (3.0 + 4.0 * vLife) * (52.0 / max(-mv.z, 1.0));
+    vec4 mv2 = modelViewMatrix * vec4(position + aVel * 0.016, 1.0);
+    vec2 d = mv2.xy - mv.xy;
+    float dl = length(d);
+    vDir = dl > 1e-5 ? vec2(d.x, -d.y) / dl : vec2(0.0, 1.0);
+    vHalf = clamp(dl * 34.0 / max(-mv.z, 1.0), 0.05, 0.42);
+    vNear = smoothstep(0.5, 1.8, -mv.z);
+    float px = (1.2 + 1.8 * aSeed) * (52.0 / max(-mv.z, 1.0));
+    gl_PointSize = clamp(px, 1.0, 16.0);
     gl_Position = projectionMatrix * mv;
   }
 `;
 
 const FRAG = /* glsl */ `
   varying float vLife;
+  varying float vSeed;
+  varying float vNear;
+  varying vec2  vDir;
+  varying float vHalf;
   void main() {
-    float d = length(gl_PointCoord - 0.5);
-    float a = smoothstep(0.5, 0.1, d) * vLife * 0.7;
+    vec2 pc = gl_PointCoord - 0.5;
+    float along = clamp(dot(pc, vDir), -vHalf, vHalf);
+    float d = length(pc - vDir * along);
+    float w = 0.11 + 0.08 * vSeed;
+    float a = smoothstep(w, w * 0.3, d) * vLife * 0.5 * vNear;
     if (a < 0.02) discard;
     gl_FragColor = vec4(0.85, 0.92, 1.0, a); // linear HDR; OutputPass tonemaps
   }
@@ -44,10 +68,14 @@ export class Runoff {
     this.positions = new Float32Array(MAX_DROPS * 3);
     this.velocities = new Float32Array(MAX_DROPS * 3);
     this.life = new Float32Array(MAX_DROPS);
+    this.seeds = new Float32Array(MAX_DROPS);
+    for (let i = 0; i < MAX_DROPS; i++) this.seeds[i] = Math.random();
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
     geo.setAttribute('aLife', new THREE.BufferAttribute(this.life, 1));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(this.seeds, 1));
+    geo.setAttribute('aVel', new THREE.BufferAttribute(this.velocities, 3));
 
     this.points = new THREE.Points(
       geo,
@@ -128,6 +156,7 @@ export class Runoff {
     if (any) {
       this.points.geometry.attributes.position.needsUpdate = true;
       this.points.geometry.attributes.aLife.needsUpdate = true;
+      this.points.geometry.attributes.aVel.needsUpdate = true;
     }
   }
 }

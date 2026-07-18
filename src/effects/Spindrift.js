@@ -14,22 +14,46 @@ const MAX = 2600;
 const LIFE = 1.0;
 const RADIUS = 55; // emit within this radius of the camera (m)
 
+// Same streaked-capsule droplet rendering as Spray.js (see the rationale
+// there). Spindrift especially is STREAKS in real life — spray ripped
+// horizontally downwind — so the velocity stretch does most of the work.
 const VERT = /* glsl */ `
   attribute float aLife;
+  attribute float aSeed;
+  attribute vec3  aVel;
   varying float vLife;
+  varying float vSeed;
+  varying float vNear;
+  varying vec2  vDir;
+  varying float vHalf;
   void main() {
     vLife = aLife;
+    vSeed = aSeed;
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = (4.0 + 9.0 * (1.0 - aLife)) * (55.0 / max(-mv.z, 1.0));
+    vec4 mv2 = modelViewMatrix * vec4(position + aVel * 0.016, 1.0);
+    vec2 d = mv2.xy - mv.xy;
+    float dl = length(d);
+    vDir = dl > 1e-5 ? vec2(d.x, -d.y) / dl : vec2(0.0, 1.0);
+    vHalf = clamp(dl * 26.0 / max(-mv.z, 1.0), 0.06, 0.45);
+    vNear = smoothstep(0.6, 2.0, -mv.z);
+    float px = (1.4 + 2.2 * aSeed + 1.6 * (1.0 - aLife)) * (55.0 / max(-mv.z, 1.0));
+    gl_PointSize = clamp(px, 1.0, 16.0);
     gl_Position = projectionMatrix * mv;
   }
 `;
 
 const FRAG = /* glsl */ `
   varying float vLife;
+  varying float vSeed;
+  varying float vNear;
+  varying vec2  vDir;
+  varying float vHalf;
   void main() {
-    float d = length(gl_PointCoord - 0.5);
-    float a = smoothstep(0.5, 0.12, d) * vLife * 0.5;
+    vec2 pc = gl_PointCoord - 0.5;
+    float along = clamp(dot(pc, vDir), -vHalf, vHalf);
+    float d = length(pc - vDir * along);
+    float w = 0.13 + 0.09 * vSeed;
+    float a = smoothstep(w, w * 0.3, d) * vLife * 0.4 * vNear;
     if (a < 0.02) discard;
     gl_FragColor = vec4(0.92, 0.96, 1.0, a);
   }
@@ -40,9 +64,13 @@ export class Spindrift {
     this.positions = new Float32Array(MAX * 3);
     this.velocities = new Float32Array(MAX * 3);
     this.life = new Float32Array(MAX);
+    this.seeds = new Float32Array(MAX);
+    for (let i = 0; i < MAX; i++) this.seeds[i] = Math.random();
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
     geo.setAttribute('aLife', new THREE.BufferAttribute(this.life, 1));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(this.seeds, 1));
+    geo.setAttribute('aVel', new THREE.BufferAttribute(this.velocities, 3));
     this.points = new THREE.Points(
       geo,
       new THREE.ShaderMaterial({ vertexShader: VERT, fragmentShader: FRAG, transparent: true, depthWrite: false })
@@ -102,6 +130,7 @@ export class Spindrift {
     if (any) {
       this.points.geometry.attributes.position.needsUpdate = true;
       this.points.geometry.attributes.aLife.needsUpdate = true;
+      this.points.geometry.attributes.aVel.needsUpdate = true;
     }
   }
 }

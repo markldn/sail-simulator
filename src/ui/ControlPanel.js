@@ -62,6 +62,11 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
   const rigFolder = gui.addFolder('Rig');
   rigFolder.add(boat.physics.sailPlan, 'main', 0, 1, 0.05).name('Mainsail hoist').listen();
   rigFolder.add(boat.physics.sailPlan, 'jib', 0, 1, 0.05).name('Jib (furler)').listen();
+  const helmStyle = { style: 'tiller' };
+  rigFolder
+    .add(helmStyle, 'style', ['tiller', 'wheel'])
+    .name('Helm style')
+    .onChange((v) => boat.setHelmStyle(v));
 
   // --- Sea state --------------------------------------------------------------
   // With "Sea follows wind" on (default) the sliders are read-only displays
@@ -80,16 +85,22 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
     .name('Choppiness')
     .listen()
     .onChange((v) => ocean.setChoppiness(v));
-  const syncSeaMode = (auto) => {
-    heightCtrl.enable(!auto);
-    chopCtrl.enable(!auto);
-  };
+  // Directional spread (Arc Blanc / Horvath spectrum). Swell ξ elongates the
+  // crests into long parallel lines; Directionality δ blends between waves
+  // arriving from every direction (0 — maximal crossing seas) and the full
+  // wind-aligned Donelan-Banner spread (1). Both rebuild the spectrum with
+  // preserved phases, so the sea morphs instead of jumping.
+  const spread = { swell: ocean.fft.swell, delta: ocean.fft.delta };
+  const applySpread = () => ocean.setSpread(spread.swell, spread.delta);
+  seaFolder.add(spread, 'swell', 0, 1, 0.01).name('Swell ξ').onChange(applySpread);
+  seaFolder.add(spread, 'delta', 0, 1, 0.01).name('Directionality δ').onChange(applySpread);
+  // Wave height × / Choppiness stay live in BOTH modes: they are multipliers
+  // applied ON TOP of the wind-driven sea (fft.scale = heightScale · windAmp),
+  // not values the wind overwrites — so there is nothing to grey out.
   seaFolder
     .add(ocean, 'seaFollowsWind')
     .name('Sea follows wind')
-    .listen()
-    .onChange(syncSeaMode);
-  syncSeaMode(ocean.seaFollowsWind);
+    .listen();
 
   // --- Sky / sun ----------------------------------------------------------------
   const applySun = () => {
@@ -110,16 +121,20 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
   // swell.bearingRel aims the event wave relative to the boat's heading at
   // the moment you press the button.
   const PRESETS = {
+    // Turbidity retuned against real Preetham reference values: clean
+    // maritime air (no city haze, close to the water) sits near the clear
+    // end of the scale (~2-4), not the milky-hazy end (~6+) — see
+    // SkySystem.js's constructor comment.
     '⛵ Fair sailing': {
-      windKn: 12, windDir: 315, sunElev: 32, sunAz: 155, turbidity: 6,
-      rayleigh: 1.8, fog: 0.0016, exposure: 0.5, main: 1, jib: 1, overcast: 0,
+      windKn: 12, windDir: 315, sunElev: 32, sunAz: 155, turbidity: 3,
+      rayleigh: 2.2, fog: 0.0016, exposure: 0.5, main: 1, jib: 1, overcast: 0,
     },
     '🌅 Calm dawn': {
-      windKn: 3, sunElev: 7, sunAz: 95, turbidity: 4, rayleigh: 2.2,
+      windKn: 3, sunElev: 7, sunAz: 95, turbidity: 3, rayleigh: 2.4,
       fog: 0.0022, exposure: 0.55, main: 1, jib: 1, overcast: 0.05,
     },
     '💨 Fresh breeze': {
-      windKn: 18, sunElev: 48, turbidity: 5, rayleigh: 1.6,
+      windKn: 18, sunElev: 48, turbidity: 4, rayleigh: 2.0,
       fog: 0.0014, exposure: 0.5, main: 1, jib: 1, overcast: 0.15,
     },
     '🌫 Fog bank': {
@@ -128,7 +143,8 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
     },
     // Reefed main, no jib — the seamanlike gale rig. Try full sail here
     // and watch the knockdowns. Gloom comes from the overcast factor, not
-    // turbidity (high Preetham turbidity BRIGHTENS the sky — wrong tool).
+    // turbidity — turbidity only scales the clear-sky haze/aerosol (Mie)
+    // term, it has no cloud-occlusion behaviour of its own to lean on.
     '⛈ Gale': {
       windKn: 34, sunElev: 18, turbidity: 8, rayleigh: 0.8,
       fog: 0.005, exposure: 0.42, main: 0.4, jib: 0, overcast: 0.8,
@@ -163,7 +179,6 @@ export function createControlPanel({ wind, ocean, sky, renderer, probes, boat, c
     if (p.sunElev != null) sky.elevationDeg = p.sunElev;
     if (p.sunAz != null) sky.azimuthDeg = p.sunAz;
     ocean.seaFollowsWind = true;
-    syncSeaMode(true);
     applySun(); // rebake sky/env + push colors & fog to the ocean
     if (p.swell) {
       const h = boat.physics.getState(_tmpState).heading;

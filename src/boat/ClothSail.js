@@ -412,6 +412,22 @@ export class ClothSail {
   }
 
   /**
+   * A representative surface normal (boat-local frame), read from the
+   * actual simulated/computed mesh rather than re-derived analytically —
+   * used to fake sailcloth's real light transmission (see Sails.js). Takes
+   * the mid-sail particle: away from the luff/leech edges, where a taut
+   * sail's normal is most representative of its overall facing.
+   * @param {THREE.Vector3} out
+   */
+  getRepresentativeNormal(out) {
+    const i = Math.floor(this.rows / 2);
+    const j = Math.floor(this.cols / 2);
+    const k = this.id(i, j) * 3;
+    const n = this.geometry.attributes.normal.array;
+    return out.set(n[k], n[k + 1], n[k + 2]);
+  }
+
+  /**
    * NaN watchdog — a blown-up sail is re-laid flat rather than left broken.
    * Checks a FREE interior particle plus the integrated force: the force is
    * a sum over every triangle, so any poisoned particle poisons it — this

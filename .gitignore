@@ -2,3 +2,10 @@ node_modules/
 dist/
 .DS_Store
 *.log
+run.sh
+*.crdownload
+*.pdf
+screenshots/
+capture-screenshots.cjs
+done.md
+TODO.md

@@ -186,6 +186,100 @@ function addRailTube(parent, points, radius, material) {
   return mesh;
 }
 
+/**
+ * Rounded-corner, bevel-topped slab — the cabin trunk. A sharp BoxGeometry
+ * trunk reads as a shipping container; real coachroofs have radiused corners
+ * and a cambered top edge. Footprint w (fore-aft) × d (beam), height h,
+ * corner radius r; the extrude bevel rounds the top rim.
+ */
+function roundedSlab(w, d, h, r) {
+  const hw = w / 2 - r;
+  const hd = d / 2 - r;
+  const shape = new THREE.Shape();
+  shape.absarc(hw, hd, r, 0, Math.PI / 2);
+  shape.absarc(-hw, hd, r, Math.PI / 2, Math.PI);
+  shape.absarc(-hw, -hd, r, Math.PI, Math.PI * 1.5);
+  shape.absarc(hw, -hd, r, Math.PI * 1.5, Math.PI * 2);
+  const bevel = Math.min(0.09, h * 0.4);
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: h - bevel,
+    bevelEnabled: true,
+    bevelThickness: bevel,
+    bevelSize: bevel * 0.9,
+    bevelSegments: 3,
+    curveSegments: 10,
+  });
+  geo.rotateX(-Math.PI / 2); // extrude along +Y (up)
+  return geo;
+}
+
+/**
+ * Cabin wall ring: a single extruded outline that traces the rounded outer
+ * footprint, walks IN through the companionway gap, and returns around the
+ * inner face — hollow walls with a genuine doorway, no CSG needed.
+ * w×d footprint, corner radius r, wall thickness t, doorway half-width
+ * doorHalf (on the aft edge), wall height h.
+ */
+function cabinWallGeometry(w, d, r, t, doorHalf, h) {
+  const hw = w / 2;
+  const hd = d / 2;
+  const iw = hw - t;
+  const id = hd - t;
+  const s = new THREE.Shape();
+  s.moveTo(-hw, -doorHalf);
+  s.lineTo(-hw, -(hd - r));
+  s.quadraticCurveTo(-hw, -hd, -(hw - r), -hd);
+  s.lineTo(hw - r, -hd);
+  s.quadraticCurveTo(hw, -hd, hw, -(hd - r));
+  s.lineTo(hw, hd - r);
+  s.quadraticCurveTo(hw, hd, hw - r, hd);
+  s.lineTo(-(hw - r), hd);
+  s.quadraticCurveTo(-hw, hd, -hw, hd - r);
+  s.lineTo(-hw, doorHalf);
+  s.lineTo(-iw, doorHalf); // through the door jamb
+  s.lineTo(-iw, id);
+  s.lineTo(iw, id);
+  s.lineTo(iw, -id);
+  s.lineTo(-iw, -id);
+  s.lineTo(-iw, -doorHalf);
+  s.closePath();
+  const geo = new THREE.ExtrudeGeometry(s, { depth: h, bevelEnabled: false, curveSegments: 8 });
+  geo.rotateX(-Math.PI / 2);
+  return geo;
+}
+
+/** Compass card: cream disc, 30° ticks, cardinal letters, north in red. */
+function makeCompassCardTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = '#efe9da';
+  g.beginPath();
+  g.arc(64, 64, 63, 0, Math.PI * 2);
+  g.fill();
+  g.strokeStyle = '#2a2d31';
+  g.lineWidth = 2;
+  for (let d = 0; d < 360; d += 30) {
+    const a = (d * Math.PI) / 180;
+    g.beginPath();
+    g.moveTo(64 + Math.sin(a) * 52, 64 - Math.cos(a) * 52);
+    g.lineTo(64 + Math.sin(a) * 62, 64 - Math.cos(a) * 62);
+    g.stroke();
+  }
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.font = 'bold 26px sans-serif';
+  const L = [['N', 0, '#c22020'], ['E', 90, '#2a2d31'], ['S', 180, '#2a2d31'], ['W', 270, '#2a2d31']];
+  for (const [ch, d, col] of L) {
+    const a = (d * Math.PI) / 180;
+    g.fillStyle = col;
+    g.fillText(ch, 64 + Math.sin(a) * 36, 64 - Math.cos(a) * 36);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.anisotropy = 4;
+  return tex;
+}
+
 export function createBoatModel() {
   const boat = new THREE.Group();
   boat.name = 'boat';
@@ -217,18 +311,182 @@ export function createBoatModel() {
     addRailTube(boat, linePts, 0.007, M.rigging);
   }
 
-  // --- cabin trunk with windows and companionway ---------------------------
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.48, 1.46), M.cabin);
-  cabin.position.set(-0.4, HULL.sheer + 0.24, 0);
+  // --- cabin trunk: hollow walls + rounded roof + real doorway --------------
+  // The trunk is a WALL RING (extruded outline that walks in through the
+  // companionway gap and around the inner face) so the doorway is a genuine
+  // opening into the cabin, not paint on a solid block. Rounded roof on top.
+  const cabin = new THREE.Mesh(cabinWallGeometry(2.4, 1.46, 0.30, 0.10, 0.27, 0.40), M.cabin);
+  cabin.position.set(-0.4, HULL.sheer - 0.02, 0);
   boat.add(cabin);
+  const roof = new THREE.Mesh(roundedSlab(2.4, 1.46, 0.13, 0.30), M.cabin);
+  roof.position.set(-0.4, HULL.sheer + 0.355, 0);
+  boat.add(roof);
+
+  // --- cabin interior --------------------------------------------------------
+  // A furnished saloon under the trunk, enclosed in its own inward-facing
+  // shell (the hull mesh is single-sided, so without the shell you'd see
+  // ocean through the floor). Visible through the companionway; the warm
+  // lamp is what sells it at dusk.
+  {
+    const interior = new THREE.Group();
+    interior.name = 'cabinInterior';
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xd9cdb8, roughness: 0.9, side: THREE.BackSide });
+    const cushMat = new THREE.MeshStandardMaterial({ color: 0x37517a, roughness: 0.85 });
+    // Tall enough to line the trunk from the inside (stops the sky showing
+    // through the wall band above deck level) and long enough that its aft
+    // face sits BEHIND the companionway plane — from inside, looking aft
+    // through the open door, you see a plausible recess, not a sealed wall.
+    const shell = new THREE.Mesh(new THREE.BoxGeometry(2.85, 1.76, 1.38), wallMat);
+    shell.position.set(-0.32, HULL.sheer - 0.45, 0);
+    interior.add(shell);
+    const sole = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.03, 1.25), M.deck);
+    sole.position.set(-0.35, HULL.sheer - 1.32, 0);
+    interior.add(sole);
+    for (const side of [-1, 1]) {
+      const settee = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.30, 0.44), cushMat);
+      settee.position.set(-0.25, HULL.sheer - 0.88, side * 0.42);
+      interior.add(settee);
+    }
+    const tablePed = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.55, 8), M.spar);
+    tablePed.position.set(-0.2, HULL.sheer - 1.02, 0);
+    interior.add(tablePed);
+    const tableTop = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.04, 0.46), M.teakTrim);
+    tableTop.position.set(-0.2, HULL.sheer - 0.73, 0);
+    interior.add(tableTop);
+    // V-berth suggestion forward, companionway steps aft.
+    const berth = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.24, 1.05), cushMat);
+    berth.position.set(0.55, HULL.sheer - 0.95, 0);
+    interior.add(berth);
+    for (const [sy, sx] of [[-0.45, -1.42], [-0.85, -1.28]]) {
+      const step = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.045, 0.5), M.teakTrim);
+      step.position.set(sx, HULL.sheer + sy, 0);
+      interior.add(step);
+    }
+    const lamp = new THREE.PointLight(0xffd9a8, 0.9, 6.5);
+    lamp.position.set(-0.4, HULL.sheer + 0.2, 0);
+    interior.add(lamp);
+    boat.add(interior);
+  }
+  // The rounded trunk bulges to ~0.81 half-beam at mid-height (0.73 + bevel):
+  // panes must sit PROUD of that or the curve swallows them whole.
   for (const side of [-1, 1]) {
-    const win = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.17, 0.02), M.window);
-    win.position.set(-0.35, HULL.sheer + 0.3, side * 0.74);
+    const win = new THREE.Mesh(new THREE.BoxGeometry(1.55, 0.16, 0.09), M.window);
+    win.position.set(-0.35, HULL.sheer + 0.27, side * 0.795);
     boat.add(win);
   }
-  const hatch = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.34, 0.52), M.window);
-  hatch.position.set(-1.62, HULL.sheer + 0.26, 0);
-  boat.add(hatch);
+  // Front windows: two panes flanking the mast on the forward face, turned
+  // slightly to follow the corner radius.
+  for (const side of [-1, 1]) {
+    const win = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.15, 0.44), M.window);
+    win.position.set(0.845, HULL.sheer + 0.27, side * 0.30);
+    win.rotation.y = side * 0.18;
+    boat.add(win);
+  }
+
+  // --- companionway door on the aft face ------------------------------------
+  // Teak-framed washboards with a smoked acrylic top light — the way into
+  // the cabin. (The old flat hatch panel was swallowed by the rounded
+  // trunk's aft bulge.)
+  // Teak frame around the opening: two jambs + a header — NOT a solid slab
+  // (a filled box here just re-blocks the doorway the wall ring opened up).
+  for (const side of [-1, 1]) {
+    const jamb = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.44, 0.05), M.teakTrim);
+    jamb.position.set(-1.665, HULL.sheer + 0.20, side * 0.295);
+    boat.add(jamb);
+  }
+  const header = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.64), M.teakTrim);
+  header.position.set(-1.665, HULL.sheer + 0.445, 0);
+  boat.add(header);
+  // Washboards + top light slide DOWN together when clicked (RigInteract
+  // animates the 'doorBoards' group), opening the companionway to the saloon.
+  const doorGroup = new THREE.Group();
+  doorGroup.name = 'doorBoards';
+  const doorBoards = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.30, 0.50), M.deck);
+  doorBoards.position.set(-1.685, HULL.sheer + 0.17, 0);
+  doorGroup.add(doorBoards);
+  const doorLight = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.12, 0.50), M.window);
+  doorLight.position.set(-1.685, HULL.sheer + 0.39, 0);
+  doorGroup.add(doorLight);
+  boat.add(doorGroup);
+  // Sliding hatch garage on the cabin top over the companionway.
+  const hatchSlide = new THREE.Mesh(roundedSlab(0.62, 0.62, 0.06, 0.08), M.cabin);
+  hatchSlide.position.set(-1.28, HULL.sheer + 0.46, 0);
+  boat.add(hatchSlide);
+
+  // --- working bulkhead compass ---------------------------------------------
+  // A gimballed card under a glass dome, offset to starboard of the door.
+  // Boat.js cancels the hull's rotation on the 'compassCard' group every
+  // frame, so the card stays level and north-aligned while the boat turns
+  // and heels — read it against the fixed red lubber line, like the real
+  // instrument. (Canvas card texture: N red, E/S/W + 30° ticks.)
+  const compassZ = 0.52;
+  const compassBase = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.10, 12), M.spar);
+  compassBase.position.set(-1.70, HULL.sheer + 0.36, compassZ);
+  boat.add(compassBase);
+  const card = new THREE.Group();
+  card.name = 'compassCard';
+  card.position.set(-1.70, HULL.sheer + 0.425, compassZ);
+  const cardDisc = new THREE.Mesh(
+    new THREE.CircleGeometry(0.055, 24).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ map: makeCompassCardTexture() })
+  );
+  card.add(cardDisc);
+  boat.add(card);
+  // Lubber line: fixed to the BOAT, points at the bow over the card's rim.
+  const lubber = new THREE.Mesh(
+    new THREE.BoxGeometry(0.03, 0.006, 0.006),
+    new THREE.MeshBasicMaterial({ color: 0xd82020 })
+  );
+  lubber.position.set(-1.70 + 0.055, HULL.sheer + 0.432, compassZ);
+  boat.add(lubber);
+  const compassDome = new THREE.Mesh(
+    new THREE.SphereGeometry(0.068, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+    new THREE.MeshPhysicalMaterial({
+      color: 0xdfeef4, transparent: true, opacity: 0.22,
+      roughness: 0.05, clearcoat: 1.0,
+    })
+  );
+  compassDome.position.set(-1.70, HULL.sheer + 0.42, compassZ);
+  boat.add(compassDome);
+
+  // --- pushpit (stern rail) and pulpit (bow rail) ---------------------------
+  // Stainless tube frames closing the lifeline run at both ends — the stern
+  // was bare before, so the cockpit read as open to the sea.
+  {
+    const railY = HULL.sheer + 0.60;
+    const pushPts = [];
+    for (const [t, side] of [[0.14, -1], [0.04, -1], [0.005, -0.55], [0.005, 0.55], [0.04, 1], [0.14, 1]]) {
+      pushPts.push(new THREE.Vector3(stationX(t), railY, side * Math.max(halfBreadth(t) - 0.07, 0.12)));
+    }
+    addRailTube(boat, pushPts, 0.018, M.spar);
+    for (const [t, side] of [[0.13, -1], [0.03, -1], [0.03, 1], [0.13, 1]]) {
+      const z = side * (halfBreadth(t) - 0.07);
+      addLine(
+        boat,
+        new THREE.Vector3(stationX(t), HULL.sheer + 0.02, z),
+        new THREE.Vector3(stationX(t), railY, z),
+        0.016,
+        M.spar
+      );
+    }
+    // Bow pulpit: lower hoop wrapping the stem.
+    const pulY = HULL.sheer + 0.52;
+    const pulPts = [];
+    for (const [t, side] of [[0.86, -1], [0.94, -1], [0.985, -0.4], [0.985, 0.4], [0.94, 1], [0.86, 1]]) {
+      pulPts.push(new THREE.Vector3(stationX(t), pulY, side * Math.max(halfBreadth(t) - 0.06, 0.05)));
+    }
+    addRailTube(boat, pulPts, 0.018, M.spar);
+    for (const [t, side] of [[0.87, -1], [0.95, -1], [0.95, 1], [0.87, 1]]) {
+      const z = side * (halfBreadth(t) - 0.06);
+      addLine(
+        boat,
+        new THREE.Vector3(stationX(t), HULL.sheer + 0.02, z),
+        new THREE.Vector3(stationX(t), pulY, z),
+        0.016,
+        M.spar
+      );
+    }
+  }
 
   // --- cockpit hardware -----------------------------------------------------
   for (const side of [-1, 1]) {
@@ -262,10 +520,37 @@ export function createBoatModel() {
   blade.position.set(-0.06, -0.55, 0);
   rudderGroup.add(blade);
   const tiller = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.035, 0.05), M.teakTrim);
+  tiller.name = 'tiller';
   tiller.position.set(0.62, HULL.sheer + 0.12, 0);
   tiller.rotation.z = 0.12; // slight rise towards the grip
   rudderGroup.add(tiller);
   boat.add(rudderGroup);
+
+  // --- wheel helm variant (hidden until selected in the GUI) ----------------
+  // Binnacle pedestal + spoked wheel in the cockpit. Boat.js spins the
+  // 'wheelSpin' group with the rudder (a few turns lock-to-lock); the GUI
+  // "Helm style" control swaps tiller ↔ wheel visibility.
+  {
+    const wheelHelm = new THREE.Group();
+    wheelHelm.name = 'wheelHelm';
+    wheelHelm.visible = false;
+    const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.08, 0.78, 10), M.spar);
+    pedestal.position.set(-2.15, HULL.sheer + 0.39, 0);
+    wheelHelm.add(pedestal);
+    const spin = new THREE.Group();
+    spin.name = 'wheelSpin';
+    spin.position.set(-2.05, HULL.sheer + 0.86, 0);
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.024, 8, 22), M.teakTrim);
+    rim.rotation.y = Math.PI / 2; // wheel plane faces fore-aft
+    spin.add(rim);
+    for (let i = 0; i < 5; i++) {
+      const spoke = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.62, 6), M.spar);
+      spoke.rotation.x = (i * Math.PI) / 5;
+      spin.add(spoke);
+    }
+    wheelHelm.add(spin);
+    boat.add(wheelHelm);
+  }
 
   // --- mast, spreaders, standing rigging ------------------------------------
   const mast = new THREE.Mesh(

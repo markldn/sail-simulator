@@ -19,19 +19,27 @@ export class Boat {
    * @param {import('../ocean/Ocean.js').Ocean} ocean
    * @param {import('../wind/WindManager.js').WindManager} wind
    * @param {{rudderDeg:number, sheetMaxDeg:number, autoTrim:boolean}} helmState
+   * @param {import('../environment/SkySystem.js').SkySystem} [sky] for the
+   *        sail backlight fake (see Sails._applyBacklight) — optional so
+   *        headless/test construction still works without a sky.
    */
-  constructor(scene, physicsWorld, ocean, wind, helmState) {
+  constructor(scene, physicsWorld, ocean, wind, helmState, sky = null) {
     this.model = createBoatModel();
     scene.add(this.model);
 
     this.helmState = helmState;
     this.ocean = ocean; // for wet-sail submersion queries
+    this.sky = sky;
     this.physics = new BoatPhysics(physicsWorld, ocean, wind, helmState);
     this.sails = new Sails(this.model);
     // Two-way coupling: cloth pressure/CP feeds back into hull forces.
     this.sails.onClothAero = (data) => this.physics.setClothAero(data);
     this._rudderGroup = this.model.getObjectByName('rudder');
     this._windex = this.model.getObjectByName('windex');
+    this._compassCard = this.model.getObjectByName('compassCard');
+    this._tiller = this.model.getObjectByName('tiller');
+    this._wheelHelm = this.model.getObjectByName('wheelHelm');
+    this._wheelSpin = this.model.getObjectByName('wheelSpin');
     this._state = {};
 
     // --- debug: buoyancy sample markers ------------------------------------
@@ -54,6 +62,7 @@ export class Boat {
     this._qInv = new THREE.Quaternion(); // scratch: inverse hull orientation
     this._colSub = new THREE.Color(0x33ff66);
     this._colDry = new THREE.Color(0x556066);
+    this._sunState = this.sky ? { dirWorld: new THREE.Vector3(), color: new THREE.Color(), quaternion: new THREE.Quaternion() } : null;
   }
 
   /**
@@ -74,12 +83,28 @@ export class Boat {
     const mainSub = this._updateSailWater(this.sails.main, s);
     const jibSub = this._updateSailWater(this.sails.jib, s);
     this.sails.setWetness(mainSub, jibSub, dt);
-    this.sails.update(this.physics.lastAero, time, dt, this.physics.sailPlan);
+    if (this._sunState) {
+      this._sunState.dirWorld.copy(this.sky.sunDir);
+      this._sunState.color.copy(this.sky.sunColor);
+      this._sunState.quaternion.copy(s.quaternion);
+    }
+    this.sails.update(this.physics.lastAero, time, dt, this.physics.sailPlan, this._sunState);
     // +rudderDeg = bow to starboard: blade trailing edge swings starboard,
     // tiller sweeps to port — matching real tiller geometry.
     this._rudderGroup.rotation.y = THREE.MathUtils.degToRad(this.helmState.rudderDeg);
     // Masthead windex points INTO the apparent wind.
     this._windex.rotation.y = -THREE.MathUtils.degToRad(this.physics.lastAero.awaDeg);
+    // Compass card: cancel the hull's rotation so the card stays level and
+    // north-aligned in the world — gimbal and magnet in one line. The boat
+    // (and its fixed red lubber line) turns AROUND the card, exactly like
+    // the real instrument.
+    if (this._compassCard) {
+      this._compassCard.quaternion.copy(s.quaternion).invert();
+    }
+    // Wheel helm (if selected): spin with the rudder, ~2.5 turns lock-to-lock.
+    if (this._wheelSpin && this._wheelHelm.visible) {
+      this._wheelSpin.rotation.x = -THREE.MathUtils.degToRad(this.helmState.rudderDeg) * 2.5;
+    }
 
     if (this.sampleMarkers.visible) {
       const { samples, lastDepth } = this.physics;
@@ -162,6 +187,13 @@ export class Boat {
     }
     cloth.submerged = anySub;
     return below / cloth.n;
+  }
+
+  /** Swap the cockpit between tiller and wheel steering (GUI "Helm style"). */
+  setHelmStyle(style) {
+    const wheel = style === 'wheel';
+    if (this._tiller) this._tiller.visible = !wheel;
+    if (this._wheelHelm) this._wheelHelm.visible = wheel;
   }
 
   reset() {
