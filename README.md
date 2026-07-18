@@ -12,28 +12,15 @@ browser, no install or asset downloads required.
 
 ## Features
 
-- **FFT ocean** — multi-cascade Gerstner/FFT wave field with a real-time CPU
-  height query so the boat actually rides the same surface the GPU renders.
-  Whitecap foam is driven by physical breaking mechanisms (bubble rafts,
-  windrows, decaying foam memory) rather than noise blobs.
-- **Boat physics** — rigid-body hull with sampled-column buoyancy, hydrodynamic
-  drag, wave-making resistance, and wind shear. Knockdowns, slamming, and
-  capsize containment are all handled.
-- **Cloth sails** — the main and jib are true position-based-dynamics cloth,
-  aerodynamically loaded so they luff, flap, and fill correctly. Trim is
-  coupled back into the forces (two-way cloth ↔ physics coupling).
-- **Dynamic weather** — physically-based sky (Rayleigh + Mie single scattering),
-  fractal procedural clouds, rain, thunderstorms with lightning and
-  distance-delayed thunder.
-- **Effects** — bow spray, deck runoff, spindrift torn off the crests, breaking
-  waves, birds, and marine life (dolphins, sharks, whales).
-- **Procedural audio** — wind, sea, hull rush, rain, rig creaks, slam impacts,
-  gull cries, and thunder, all synthesised live.
-- **First-person helm** — walk the deck (WASD), sit in the helm seat, and **drag
-  the running rigging** with the mouse to trim sheets and hoist/reef the main.
-- **Planar reflections** — the boat and sky mirror in the water surface.
-- **Scenarios** — one-click presets: Fair sailing, Calm dawn, Fresh breeze,
-  Fog bank, Gale, Hurricane, Tsunami, Rogue wave.
+- **Realistic ocean** — FFT wave simulation with real-time buoyancy and physical whitecap foam.
+- **Boat physics** — rigid-body hull that rides, heels, and knocks down in the waves.
+- **Cloth sails** — main and jib simulated as cloth that luffs, fills, and trims like the real thing.
+- **Dynamic weather** — sky, clouds, rain, and thunderstorms with lightning and thunder.
+- **Effects** — bow spray, spindrift, breaking waves, birds, and marine life.
+- **Procedural audio** — live wind, sea, rain, rig creaks, and thunder.
+- **First-person helm** — walk the deck and drag the rigging to trim the sails.
+- **Reflections** — the boat and sky mirror in the water.
+- **Scenarios** — one-click presets from calm dawn to hurricane and rogue wave.
 
 ---
 
