@@ -24,6 +24,12 @@ browser, no install or asset downloads required.
 
 ---
 
+## Screenshots
+
+![Sailboat simulator](media/boat.png)
+
+---
+
 ## Controls
 
 | Key | Action |
