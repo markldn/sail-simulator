@@ -660,20 +660,14 @@ export class FFTOcean {
 
   /** Summed water surface height at world (x, z). */
   heightAt(x, z) {
-    let px = x;
-    let pz = z;
-    for (let it = 0; it < 4; it++) {
-      let dx = 0;
-      let dz = 0;
-      for (const c of this.cascades) {
-        dx += c._bilinear(c.dispX, px, pz);
-        dz += c._bilinear(c.dispZ, px, pz);
-      }
-      px = x - dx;
-      pz = z - dz;
-    }
+    // Sample dispY directly at (x, z) — the SAME point the GPU vertex shader
+    // uses (it displaces gridWorld + disp, sampling disp at gridWorld.xz). The
+    // boat must float on the surface that is actually DRAWN, so we match the
+    // shader exactly rather than inverse-solving for the undisplaced point
+    // (that would shift the sample by the horizontal chop offset and make the
+    // hull hover off the crest it appears to sit on).
     let h = 0;
-    for (const c of this.cascades) h += c._bilinear(c.dispY, px, pz);
+    for (const c of this.cascades) h += c._bilinear(c.dispY, x, z);
     return h;
   }
 
