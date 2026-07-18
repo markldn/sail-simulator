@@ -6,7 +6,7 @@ wave spectra, a sailing hull with sampled-column buoyancy and cloth sails, and
 a physically-based sky with dynamic weather — all running in real time in the
 browser, no install or asset downloads required.
 
-> Private repository. Built and run locally with [Vite](https://vitejs.dev/).
+> Private repository.
 
 ---
 
